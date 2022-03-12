@@ -1,0 +1,6 @@
+-Ilib
+-Icontrib/bstring/bstring
+-Icontrib/chelpers/src
+-Icontrib/cJSON
+-Icontrib/json-parser
+-Itests
