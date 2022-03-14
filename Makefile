@@ -1,5 +1,5 @@
-CFLAGS=-g -O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DNDEBUG -isystemcontrib/chelpers/src -isystemcontrib/bstring/bstring -isystemcontrib/cJSON -isystemcontrib/json-parser -Ilib $(OPTFLAGS)
-LDLIBS=-ldl -lpq -levent -pedantic -lsqlite3 -lm $(OPTLIBS)
+CFLAGS=-g -O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DNDEBUG -isystemcontrib/chelpers/src -isystemcontrib/bstring/bstring -isystemcontrib/cJSON -isystemcontrib/json-parser -isystemcontrib/json-builder -Ilib $(OPTFLAGS)
+LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm $(OPTLIBS)
 PREFIX?=/usr/local
 
 BIN_SRC=$(wildcard *.c)
@@ -11,7 +11,7 @@ TESTS=$(patsubst %.c,%,$(TEST_SRC))
 LIB_SRC=$(wildcard lib/*.c)
 LIB=$(patsubst %.c,%.o,$(LIB_SRC))
 
-EXTERNAL_SRC=$(wildcard contrib/**/bstring/bstrlib.c contrib/**/src/*.c contrib/cJSON/*.c contrib/json-parser/*.c)
+EXTERNAL_SRC=$(wildcard contrib/**/bstring/bstrlib.c contrib/**/src/*.c contrib/cJSON/*.c contrib/json-*/*.c)
 EXTERNAL_SRC_NO_TESTS=$(filter-out %test.c, $(EXTERNAL_SRC))
 EXTERNAL=$(patsubst %.c,%.o,$(EXTERNAL_SRC_NO_TESTS))
 

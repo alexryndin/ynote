@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS snippet_types (
 
 CREATE TABLE IF NOT EXISTS snippets (
   id INTEGER NOT NULL PRIMARY KEY,
-  title TEXT,
+  title TEXT UNIQUE,
   content TEXT,
   type INTEGER NOT NULL,
   FOREIGN KEY(type) REFERENCES snippet_types(id)
@@ -24,9 +24,12 @@ CREATE TABLE IF NOT EXISTS snippet_to_tags (
   tag_id NOT NULL,
   FOREIGN KEY(snippet_id) REFERENCES snippets(id),
   FOREIGN KEY(tag_id) REFERENCES tags(id)
+  UNIQUE(snippet_id, tag_id)
 );
 
 INSERT INTO snippet_types (name) VALUES ("bash");
 INSERT INTO snippet_types (name) VALUES ("plain");
+INSERT INTO snippets (title, content, type) VALUES ("Hello", "world", 1);
+INSERT INTO tags (name) VALUES ("test");
 
 COMMIT;

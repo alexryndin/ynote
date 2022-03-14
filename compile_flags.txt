@@ -3,4 +3,5 @@
 -Icontrib/chelpers/src
 -Icontrib/cJSON
 -Icontrib/json-parser
+-Icontrib/json-builder
 -Itests

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 if [[ ! -f "test.db" ]]; then
     sqlite3 test.db < init_db.sql

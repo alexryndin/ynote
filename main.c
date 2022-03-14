@@ -4,6 +4,8 @@
 #include <event2/buffer.h>
 #include <event2/event.h>
 #include <event2/http.h>
+#include <event2/keyvalq_struct.h>
+#include <json-builder.h>
 #include <json.h>
 #include <stdlib.h>
 
@@ -33,6 +35,108 @@ struct WNContext {
 
 static void
 json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
+    char *reason = "OK";
+    int rc = 200;
+    struct evbuffer *resp = NULL;
+    resp = evbuffer_new();
+    CHECK_MEM(resp);
+    evhttp_add_header(
+        evhttp_request_get_output_headers(req),
+        "Content-Type",
+        "application/json");
+
+    CHECK(
+        evbuffer_add_printf(resp, "OK"), "Couldn't append to response buffer");
+
+exit:
+    if (resp != NULL) {
+        evhttp_send_reply(req, rc, reason, resp);
+    } else {
+        evhttp_send_reply(req, rc, reason, NULL);
+    }
+    evbuffer_free(resp);
+    return;
+
+error:
+    rc = 500;
+    reason = "Internal Server Error";
+    if (resp != NULL) {
+        evbuffer_drain(resp, evbuffer_get_length(resp));
+        if (evbuffer_add_printf(resp, "500") <= 0) {
+            evbuffer_free(resp);
+            resp = NULL;
+        };
+    }
+    goto exit;
+}
+
+static void simple_free_cb(const void *data, size_t datalen, void *extra) {
+    free((void *)data);
+}
+
+static void json_api_find_snippets(
+    struct evhttp_request *req, const struct WNContext *wctx) {
+    char *reason = "OK";
+    int rc = 200;
+    int err = 0;
+    struct evbuffer *resp = NULL;
+    const struct evhttp_uri *euri = NULL;
+    struct evkeyvalq queries;
+    json_value *json_res = NULL;
+    json_serialize_opts json_opts = {.mode = json_serialize_mode_packed};
+
+    resp = evbuffer_new();
+    CHECK_MEM(resp);
+
+    evhttp_add_header(
+        evhttp_request_get_output_headers(req),
+        "Content-Type",
+        "application/json; charset=UTF-8");
+
+    euri = evhttp_request_get_evhttp_uri(req);
+    evhttp_parse_query_str(evhttp_uri_get_query(euri), &queries);
+    LOG_INFO(
+        "json_api_find_snippets got %s", evhttp_find_header(&queries, "title"));
+    json_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, NULL, &err);
+    CHECK(json_res != NULL && err == DBW_OK, "Couldn't get snippets");
+
+    // buf should be freed by simple_free_cb()
+    // +1 for newline
+    size_t buf_size = json_measure_ex(json_res, json_opts) + 1;
+    char *buf = malloc(json_measure(json_res));
+    CHECK_MEM(buf);
+
+    json_serialize_ex(buf, json_res, json_opts);
+    buf[buf_size - 2] = '\n';
+    buf[buf_size - 1] = '\0';
+    // -1 -- without nul-terminator
+    CHECK(
+        evbuffer_add_reference(resp, buf, buf_size - 1, simple_free_cb, NULL) == 0,
+        "Couldn't append json to output buffer");
+exit:
+    evhttp_clear_headers(&queries);
+    if (resp != NULL) {
+        evhttp_send_reply(req, rc, reason, resp);
+    } else {
+        evhttp_send_reply(req, rc, reason, NULL);
+    }
+    evbuffer_free(resp);
+    return;
+
+error:
+    rc = 500;
+    reason = "Internal Server Error";
+    if (resp != NULL) {
+        evbuffer_drain(resp, evbuffer_get_length(resp));
+        if (evbuffer_add_printf(resp, "500") <= 0) {
+            evbuffer_free(resp);
+            resp = NULL;
+        };
+    }
+    goto exit;
+}
+static void json_api_create_snippet(
+    struct evhttp_request *req, const struct WNContext *wctx) {
     int rc = 200;
     int ec = 0;
     char *reason = "OK";
@@ -69,6 +173,7 @@ json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
     }
 
     ibuf = evhttp_request_get_input_buffer(req);
+    // read whole input buffer into json_str
     while (evbuffer_get_length(ibuf)) {
         int n;
         if ((json_str->mlen - blength(json_str)) < 2) {
@@ -160,6 +265,11 @@ json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
     if (ec == DBW_ERR_NOT_FOUND) {
         bad_request_msg = "wrong type";
         goto bad_request;
+    } else if (ec == DBW_ERR_ALREADY_EXISTS) {
+        bad_request_msg = "already exists error. possibly snippet with this "
+                          "title alredy exists";
+        goto bad_request;
+
     } else if (ec != DBW_OK) {
         goto error;
     }
@@ -225,7 +335,7 @@ int main() {
     struct event_base *base = NULL;
     struct evhttp *http = NULL;
     struct evhttp_bound_socket *handle = NULL;
-    struct tagbstring dbpath = bsStatic("test.db");
+    struct tagbstring dbpath = bsStatic("./test.db");
     struct WNContext *wctx = NULL;
     DBWHandler *db = NULL;
 
@@ -243,10 +353,24 @@ int main() {
 
     wctx->db_handle = db;
 
+    evhttp_set_cb(
+        http,
+        "/api/create_snippet",
+        (void (*)(struct evhttp_request *, void *))json_api_create_snippet,
+        wctx);
+
+    evhttp_set_cb(
+        http,
+        "/api/find_snippets",
+        (void (*)(struct evhttp_request *, void *))json_api_find_snippets,
+        wctx);
+
     evhttp_set_gencb(
         http, (void (*)(struct evhttp_request *, void *))json_api_cb, wctx);
 
+    LOG_INFO("Server started");
     event_base_dispatch(base);
+
 exit:
     return rc;
 error:

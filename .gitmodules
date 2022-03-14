@@ -10,3 +10,6 @@
 [submodule "contrib/json-parser"]
 	path = contrib/json-parser
 	url = https://github.com/json-parser/json-parser
+[submodule "contrib/json-builder"]
+	path = contrib/json-builder
+	url = https://github.com/json-parser/json-builder
