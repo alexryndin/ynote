@@ -7,6 +7,7 @@
 #include <event2/keyvalq_struct.h>
 #include <json-builder.h>
 #include <json.h>
+#include <signal.h>
 #include <stdlib.h>
 
 #ifndef BUF_LEN
@@ -30,8 +31,32 @@
     } while (0)
 
 struct WNContext {
+    struct event_base *base;
     void *db_handle;
 };
+
+static void sigint_term_handler(int sig, short events, void *arg) {
+    struct WNContext *wctx = arg;
+    CHECK(wctx != NULL, "Null contenxt");
+    CHECK(wctx->base != NULL, "Null base");
+    CHECK(wctx->db_handle != NULL, "Null db_handle");
+    switch (sig) {
+    case SIGTERM:
+        LOG_INFO("Got sigterm");
+        break;
+    case SIGINT:
+        LOG_INFO("Got sigint");
+        break;
+    default:
+        LOG_ERR("Got unexpected signal");
+    }
+    event_base_loopexit(wctx->base, NULL);
+    CHECK(
+        dbw_close(wctx->db_handle) == DBW_OK,
+        "Couldn't close database connetcion");
+error:
+    return;
+}
 
 static void
 json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
@@ -46,7 +71,7 @@ json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
         "application/json");
 
     CHECK(
-        evbuffer_add_printf(resp, "OK"), "Couldn't append to response buffer");
+        evbuffer_add_printf(resp, "{\"status\": \"ok\"}"), "Couldn't append to response buffer");
 
 exit:
     if (resp != NULL) {
@@ -95,7 +120,7 @@ static void json_api_find_snippets(
 
     euri = evhttp_request_get_evhttp_uri(req);
     evhttp_parse_query_str(evhttp_uri_get_query(euri), &queries);
-    LOG_INFO(
+    LOG_DEBUG(
         "json_api_find_snippets got %s", evhttp_find_header(&queries, "title"));
     json_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, NULL, &err);
     CHECK(json_res != NULL && err == DBW_OK, "Couldn't get snippets");
@@ -111,7 +136,8 @@ static void json_api_find_snippets(
     buf[buf_size - 1] = '\0';
     // -1 -- without nul-terminator
     CHECK(
-        evbuffer_add_reference(resp, buf, buf_size - 1, simple_free_cb, NULL) == 0,
+        evbuffer_add_reference(resp, buf, buf_size - 1, simple_free_cb, NULL) ==
+            0,
         "Couldn't append json to output buffer");
 exit:
     evhttp_clear_headers(&queries);
@@ -337,6 +363,7 @@ int main() {
     struct evhttp_bound_socket *handle = NULL;
     struct tagbstring dbpath = bsStatic("./test.db");
     struct WNContext *wctx = NULL;
+    struct event *intterm_event = NULL;
     DBWHandler *db = NULL;
 
     CHECK((base = event_base_new()) != NULL, "Couldn't initialize event base");
@@ -352,6 +379,7 @@ int main() {
     CHECK(err == 0, "Couldn't connect to database");
 
     wctx->db_handle = db;
+    wctx->base = base;
 
     evhttp_set_cb(
         http,
@@ -367,6 +395,22 @@ int main() {
 
     evhttp_set_gencb(
         http, (void (*)(struct evhttp_request *, void *))json_api_cb, wctx);
+
+    CHECK(
+        (intterm_event =
+             evsignal_new(base, SIGTERM, sigint_term_handler, wctx)) != NULL,
+        "Couldn't create sigterm handler");
+    CHECK(
+        event_add(intterm_event, NULL) == 0,
+        "Couldn't add sigterm handler to event loop");
+
+    CHECK(
+        (intterm_event =
+             evsignal_new(base, SIGINT, sigint_term_handler, wctx)) != NULL,
+        "Couldn't create sigint handler");
+    CHECK(
+        event_add(intterm_event, NULL) == 0,
+        "Couldn't add sigint handler to event loop");
 
     LOG_INFO("Server started");
     event_base_dispatch(base);
