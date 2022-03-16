@@ -53,7 +53,7 @@ int dbw_new_snippet(
     const bstring type,
     const struct bstrList *tags);
 
-json_value *dbw_find_snippets(
+bstring dbw_find_snippets(
     DBWHandler *h,
     const bstring title,
     const bstring type,

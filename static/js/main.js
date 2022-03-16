@@ -13,10 +13,10 @@ function main() {
             tbl.appendChild(tbdy);
             for (let i = 0; i < json["result"]["title"].length; i++) {
                 const tr = tbdy.insertRow();
-                const td_title = tr.insertCell();
-                td_title.appendChild(document.createTextNode(`${json["result"]["title"][i]}`));
-                const td_content = tr.insertCell();
-                td_content.appendChild(document.createTextNode(`${json["result"]["content"][i]}`));
+                for (let column of ["title", "content", "id", "created", "updated"]) {
+                    const td = tr.insertCell();
+                    td.appendChild(document.createTextNode(`${json["result"][column][i]}`));
+                }
             }
             $("#snippets")?.appendChild(tbl);
         })

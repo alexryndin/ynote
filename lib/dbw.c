@@ -7,7 +7,24 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 
+#define CHECK_JSON_OBJ_PUSH(json, field_name, obj)                 \
+    do {                                                           \
+        CHECK(                                                     \
+            json_object_push((json), (field_name), (obj)) != NULL, \
+            "Couldn't create json");                               \
+    } while (0)
+
+#define CHECK_JSON_ARRAY_STR_FIELD_PUSH(str, stmt, field_num, array)          \
+    do {                                                                      \
+        CHECK_MEM(                                                            \
+            (str) = json_string_new(                                          \
+                (json_char *)sqlite3_column_text((stmt), (field_num))));      \
+        CHECK(                                                                \
+            json_array_push((array), (str)) != NULL, "Couldn't create json"); \
+    } while (0)
+
 #define SNIPPETS_TABLE        "snippets"
+#define SNIPPET_TYPES_TABLE   "snippet_types"
 #define TAGS_TABLE            "tags"
 #define SNIPPET_TO_TAGS_TABLE "snippet_to_tags"
 
@@ -19,6 +36,33 @@ const struct tagbstring _insert_snippet_to_tags_sql = bsStatic(
     "INSERT OR IGNORE INTO " SNIPPET_TO_TAGS_TABLE
     " (snippet_id, tag_id) SELECT ?, id FROM " TAGS_TABLE " WHERE name IN (");
 
+const struct tagbstring _select_snippets = bsStatic(
+    "SELECT json_object('status', 'ok', 'result', result) from ("
+    "  SELECT json_object("
+    "    'id', json_group_array(id),"
+    "    'title', json_group_array(title),"
+    "    'type', json_group_array(type),"
+    "    'created', json_group_array(created),"
+    "    'updated', json_group_array(updated),"
+    "    'tags', json_group_array(tags)"
+    "  ) AS result"
+    "  FROM ("
+    "    SELECT " SNIPPETS_TABLE ".id as id,"
+    "           title,"
+    "           content,"
+    "           snippet_types.name as type,"
+    "           datetime(created, 'localtime') as created,"
+    "           datetime(updated, 'localtime') as updated,"
+    "           json_group_array(tags.name) as tags FROM " SNIPPETS_TABLE
+    "             JOIN " SNIPPET_TYPES_TABLE " ON " SNIPPETS_TABLE
+    ".id = " SNIPPET_TYPES_TABLE ".id"
+    "             JOIN " SNIPPET_TO_TAGS_TABLE " ON " SNIPPETS_TABLE
+    ".id = " SNIPPET_TO_TAGS_TABLE ".snippet_id"
+    "             JOIN " TAGS_TABLE " ON " SNIPPET_TO_TAGS_TABLE
+    ".tag_id = " TAGS_TABLE ".id"
+    "    WHERE 1=1 GROUP BY " SNIPPETS_TABLE ".id"
+    "  ))");
+
 // statics and helpers
 static struct tagbstring __integer = bsStatic("integer");
 
@@ -29,7 +73,7 @@ static DBWResult *DBWResult_create(int t);
 // * SQLite
 // ******************************
 
-static json_value *sqlite3_find_snippets(
+static bstring sqlite3_find_snippets(
     DBWHandler *h,
     const bstring title,
     const bstring type,
@@ -37,38 +81,12 @@ static json_value *sqlite3_find_snippets(
     int *ret_err) {
     int err = 0;
     int rc = SQLITE_OK;
-    sqlite3_int64 type_id = 0;
-    sqlite3_int64 snippet_id = 0;
     sqlite3_stmt *stmt = NULL;
-    json_value *json_ret = NULL;
-    json_value *json_array_titles_ret = NULL;
-    json_value *json_array_contents_ret = NULL;
-    json_value *json_str = NULL;
-    json_value *json_obj = NULL;
+    const unsigned char *tmp_text_res = NULL;
+    bstring ret = NULL;
     bstring q = NULL;
 
-    json_ret = json_object_new(0);
-    CHECK_MEM(json_ret);
-    json_array_titles_ret = json_array_new(0);
-    CHECK_MEM(json_array_titles_ret);
-    json_array_contents_ret = json_array_new(0);
-    CHECK_MEM(json_array_contents_ret);
-    json_obj = json_object_new(0);
-    CHECK_MEM(json_obj);
-
-    CHECK(
-        json_object_push(json_ret, "result", json_obj) != NULL,
-        "Couldn't create json");
-
-    CHECK(
-        json_object_push(json_obj, "title", json_array_titles_ret) != NULL,
-        "Couldn't create json");
-
-    CHECK(
-        json_object_push(json_obj, "content", json_array_contents_ret) != NULL,
-        "Couldn't create json");
-
-    q = bfromcstr("SELECT title, content FROM " SNIPPETS_TABLE " WHERE 1=1;");
+    q = bstrcpy((bstring)&_select_snippets);
     CHECK(q != NULL, "Couldn't create query string");
 
     CHECK(
@@ -82,28 +100,20 @@ static json_value *sqlite3_find_snippets(
     while ((err = sqlite3_step(stmt)) != SQLITE_DONE) {
         switch (err) {
         case SQLITE_ROW:
-            json_str =
-                json_string_new((json_char *)sqlite3_column_text(stmt, 0));
-            CHECK_MEM(json_str);
+            tmp_text_res = sqlite3_column_text(stmt, 0);
             CHECK(
-                json_array_push(json_array_titles_ret, json_str) != NULL,
-                "Couldn't create json");
-            json_str =
-                json_string_new((json_char *)sqlite3_column_text(stmt, 1));
-            CHECK_MEM(json_str);
-            CHECK(
-                json_array_push(json_array_contents_ret, json_str) != NULL,
-                "Couldn't create json");
+                tmp_text_res != NULL,
+                "Couldn't fetch result set from db: %s",
+                sqlite3_errmsg(h->conn));
+
+            ret = bfromcstr((char *)tmp_text_res);
+            CHECK(ret != NULL, "Couldn't gerenare result string");
             break;
         default:
             LOG_ERR("Couldn't get row from table: %s", sqlite3_errmsg(h->conn));
             goto error;
         }
     }
-    char *buf = malloc(json_measure(json_ret));
-    json_serialize(buf, json_ret);
-    LOG_DEBUG("generated json %s", buf);
-    free(buf);
 
     bdestroy(q);
     q = NULL;
@@ -120,14 +130,13 @@ exit:
     if (q != NULL) {
         bdestroy(q);
     }
-    return json_ret;
+    return ret;
 error:
-    if (json_ret != NULL) {
-        json_builder_free(json_ret);
-        json_ret = NULL;
-    }
     if (ret_err != NULL) {
         *ret_err = DBW_ERR;
+    }
+    if (ret != NULL) {
+        bdestroy(ret);
     }
     goto exit;
 }
@@ -149,7 +158,7 @@ static int sqlite3_new_snippet(
 
     // Step 1: get corresponding snippet type
     const struct tagbstring check_type_sql =
-        bsStatic("select id from snippet_types where name = ?;");
+        bsStatic("SELECT id FROM snippet_types WHERE name = ?;");
 
     CHECK(
         sqlite3_prepare_v2(
@@ -200,7 +209,7 @@ static int sqlite3_new_snippet(
 
         LOG_DEBUG("Statement is %s", bdata(q));
 
-        for (unsigned int i = 0; i < tags->qty; i++) {
+        for (int i = 0; i < tags->qty; i++) {
             CHECK(
                 sqlite3_bind_text(
                     stmt, 1 + i, bdata(tags->entry[i]), -1, NULL) == SQLITE_OK,
@@ -253,7 +262,7 @@ static int sqlite3_new_snippet(
     CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
 
     // Step 4: bind snippet to tags
-    q = bstrcpy(&_insert_snippet_to_tags_sql);
+    q = bstrcpy((bstring)&_insert_snippet_to_tags_sql);
     CHECK(q != NULL, "Couldn't create query string");
 
     question_marks = bfromcstr("?,");
@@ -280,7 +289,7 @@ static int sqlite3_new_snippet(
 
     LOG_DEBUG("query: %s", bdata(q));
 
-    for (unsigned int i = 0; i < tags->qty; i++) {
+    for (int i = 0; i < tags->qty; i++) {
         CHECK(
             sqlite3_bind_text(stmt, 2 + i, bdata(tags->entry[i]), -1, NULL) ==
                 SQLITE_OK,
@@ -633,7 +642,7 @@ int dbw_new_snippet(
     CHECK(tags != NULL, "Null tags");
     CHECK(tags->qty > 0 && tags->qty < 100, "Too many tags");
 
-    for (unsigned int i = 0; i < tags->qty; i++) {
+    for (int i = 0; i < tags->qty; i++) {
         LOG_DEBUG("Got tag %s", bdata(tags->entry[i]));
     }
     CHECK(
@@ -651,7 +660,7 @@ error:
     return DBW_ERR;
 }
 
-json_value *dbw_find_snippets(
+bstring dbw_find_snippets(
     DBWHandler *h,
     const bstring title,
     const bstring type,

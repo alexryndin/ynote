@@ -40,6 +40,9 @@ static void sigint_term_handler(int sig, short events, void *arg) {
     CHECK(wctx != NULL, "Null contenxt");
     CHECK(wctx->base != NULL, "Null base");
     CHECK(wctx->db_handle != NULL, "Null db_handle");
+
+    (void)events;
+
     switch (sig) {
     case SIGTERM:
         LOG_INFO("Got sigterm");
@@ -63,6 +66,9 @@ json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
     char *reason = "OK";
     int rc = 200;
     struct evbuffer *resp = NULL;
+
+    (void)wctx;
+
     resp = evbuffer_new();
     CHECK_MEM(resp);
     evhttp_add_header(
@@ -71,7 +77,8 @@ json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
         "application/json");
 
     CHECK(
-        evbuffer_add_printf(resp, "{\"status\": \"ok\"}"), "Couldn't append to response buffer");
+        evbuffer_add_printf(resp, "{\"status\": \"ok\"}"),
+        "Couldn't append to response buffer");
 
 exit:
     if (resp != NULL) {
@@ -96,7 +103,17 @@ error:
 }
 
 static void simple_free_cb(const void *data, size_t datalen, void *extra) {
+    (void)datalen;
+    (void)extra;
     free((void *)data);
+}
+
+static void bstring_free_cb(const void *data, size_t datalen, void *extra) {
+    (void)data;
+    (void)datalen;
+    bstring str = extra;
+    if (str != NULL)
+        bdestroy(str);
 }
 
 static void json_api_find_snippets(
@@ -107,8 +124,7 @@ static void json_api_find_snippets(
     struct evbuffer *resp = NULL;
     const struct evhttp_uri *euri = NULL;
     struct evkeyvalq queries;
-    json_value *json_res = NULL;
-    json_serialize_opts json_opts = {.mode = json_serialize_mode_packed};
+    bstring json_str_res = NULL;
 
     resp = evbuffer_new();
     CHECK_MEM(resp);
@@ -122,23 +138,22 @@ static void json_api_find_snippets(
     evhttp_parse_query_str(evhttp_uri_get_query(euri), &queries);
     LOG_DEBUG(
         "json_api_find_snippets got %s", evhttp_find_header(&queries, "title"));
-    json_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, NULL, &err);
-    CHECK(json_res != NULL && err == DBW_OK, "Couldn't get snippets");
-
-    // buf should be freed by simple_free_cb()
-    // +1 for newline
-    size_t buf_size = json_measure_ex(json_res, json_opts) + 1;
-    char *buf = malloc(json_measure(json_res));
-    CHECK_MEM(buf);
-
-    json_serialize_ex(buf, json_res, json_opts);
-    buf[buf_size - 2] = '\n';
-    buf[buf_size - 1] = '\0';
-    // -1 -- without nul-terminator
+    json_str_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, NULL, &err);
     CHECK(
-        evbuffer_add_reference(resp, buf, buf_size - 1, simple_free_cb, NULL) ==
-            0,
+        json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
+        "Couldn't get snippets");
+
+    CHECK(
+        evbuffer_add_reference(
+            resp,
+            bdata(json_str_res),
+            blength(json_str_res),
+            bstring_free_cb,
+            json_str_res) == 0,
         "Couldn't append json to output buffer");
+
+    // bstring should be free by bstring_free_cb then
+    json_str_res = NULL;
 exit:
     evhttp_clear_headers(&queries);
     if (resp != NULL) {
@@ -147,6 +162,9 @@ exit:
         evhttp_send_reply(req, rc, reason, NULL);
     }
     evbuffer_free(resp);
+    if (json_str_res != NULL) {
+        bdestroy(json_str_res);
+    }
     return;
 
 error:
@@ -173,6 +191,7 @@ static void json_api_create_snippet(
     bstring json_str = NULL;
     struct bstrList *tags = NULL;
     struct tagbstring *tags_array = NULL;
+    json_value *json = NULL;
 
     tags = calloc(1, sizeof(struct bstrList));
     CHECK_MEM(tags);
@@ -223,7 +242,7 @@ static void json_api_create_snippet(
         blength(json_str),
         json_str->mlen);
 
-    json_value *json = json_parse(bdata(json_str), blength(json_str));
+    json = json_parse(bdata(json_str), blength(json_str));
 
     if (json == NULL) {
         bad_request_msg = "JSON Malformed";
@@ -354,7 +373,7 @@ bad_request:
     goto exit;
 }
 
-int main() {
+int main(void) {
     int rc = 0;
     rc = 0;
     int err = 0;
@@ -373,7 +392,10 @@ int main() {
 
     evhttp_set_default_content_type(http, "text/html");
 
-    handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", atoi("8080"));
+    CHECK(
+        (handle = evhttp_bind_socket_with_handle(
+             http, "0.0.0.0", atoi("8080"))) != NULL,
+        "Couldn't bind to a socket");
 
     db = dbw_connect(DBW_SQLITE3, &dbpath, &err);
     CHECK(err == 0, "Couldn't connect to database");

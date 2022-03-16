@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS snippets (
   title TEXT UNIQUE,
   content TEXT,
   type INTEGER NOT NULL,
+  created DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(type) REFERENCES snippet_types(id)
 );
 
@@ -30,6 +32,11 @@ CREATE TABLE IF NOT EXISTS snippet_to_tags (
 INSERT INTO snippet_types (name) VALUES ("bash");
 INSERT INTO snippet_types (name) VALUES ("plain");
 INSERT INTO snippets (title, content, type) VALUES ("Hello", "world", 1);
-INSERT INTO tags (name) VALUES ("test");
+INSERT INTO snippets (title, content, type) VALUES ("Привет", "Мир", 1);
+INSERT INTO tags (name) VALUES ("kafka");
+INSERT INTO tags (name) VALUES ("c");
+INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (1,1);
+INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (1,2);
+INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (2,2);
 
 COMMIT;
