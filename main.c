@@ -14,6 +14,56 @@
 #define BUF_LEN 4096
 #endif
 
+#define USAGE "Usage: %s db_path\n"
+
+static struct tagbstring __true = bsStatic("true");
+
+#define INTERNAL_ERROR_HANDLE                            \
+    error:                                               \
+    rc = 500;                                            \
+    reason = "Internal Server Error";                    \
+    if (resp != NULL) {                                  \
+        evbuffer_drain(resp, evbuffer_get_length(resp)); \
+        if (evbuffer_add_printf(resp, "500") <= 0) {     \
+            evbuffer_free(resp);                         \
+            resp = NULL;                                 \
+        };                                               \
+    }                                                    \
+    goto exit
+
+#define BAD_REQ_HANDLE                                             \
+    bad_request:                                                   \
+    rc = 403;                                                      \
+    reason = "Bad Request";                                        \
+    bad_request_msg =                                              \
+        bad_request_msg == NULL ? "Bad request" : bad_request_msg; \
+    CHECK(                                                         \
+        evbuffer_add_printf(                                       \
+            resp,                                                  \
+            "{\"status\": \"error\", \"msg\": \"%s\"}",            \
+            bad_request_msg),                                      \
+        "Couldn't append to response buffer");                     \
+    goto exit
+
+#define PARSE_INT(func, num_str, num, rc)                \
+    do {                                                 \
+        errno = 0;                                       \
+        char *end;                                       \
+        (num) = (func)((num_str), &end, 10);             \
+        if ((num_str) == end) {                          \
+            (rc) = 1;                                    \
+            break;                                       \
+        }                                                \
+        const char range_error = errno == ERANGE;        \
+        if (range_error) {                               \
+            LOG_ERR("Malformed string -- range error."); \
+            rc = 2;                                      \
+            errno = 0;                                   \
+            break;                                       \
+        }                                                \
+                                                         \
+    } while (0)
+
 #define JSON_GET_ITEM(json, obj, index)                            \
     do {                                                           \
                                                                    \
@@ -35,6 +85,7 @@ struct WNContext {
     void *db_handle;
 };
 
+// Sigint sigterm handler
 static void sigint_term_handler(int sig, short events, void *arg) {
     struct WNContext *wctx = arg;
     CHECK(wctx != NULL, "Null contenxt");
@@ -115,6 +166,96 @@ static void bstring_free_cb(const void *data, size_t datalen, void *extra) {
     if (str != NULL)
         bdestroy(str);
 }
+static void
+json_api_get_snippet(struct evhttp_request *req, const struct WNContext *wctx) {
+    char *reason = "OK";
+    int ret_code = 200;
+    int err = 0;
+    struct evbuffer *resp = NULL;
+    const char *id_str = NULL;
+    sqlite_int64 id = 0;
+    struct evkeyvalq queries;
+    char *bad_request_msg = NULL;
+    bstring json_str_res = NULL;
+    int rc = 0;
+
+    resp = evbuffer_new();
+    CHECK_MEM(resp);
+
+    evhttp_add_header(
+        evhttp_request_get_output_headers(req),
+        "Content-Type",
+        "application/json; charset=UTF-8");
+
+    CHECK(
+        evhttp_parse_query_str(
+            evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)),
+            &queries) == 0,
+        "Couldn't parse query str");
+    id_str = evhttp_find_header(&queries, "id");
+    if (id_str == NULL) {
+        bad_request_msg = "id required";
+        goto bad_request;
+    }
+    PARSE_INT(strtoll, id_str, id, rc);
+    if (rc == 1) {
+        bad_request_msg = "{\"status\": \"malformed id\"}";
+        goto bad_request;
+    }
+    LOG_DEBUG("json_api_got_snippet got %lld", id);
+    json_str_res = dbw_get_snippet(wctx->db_handle, id, &err);
+    if (err == DBW_ERR_NOT_FOUND) {
+        bad_request_msg = "{\"status\": \"snippet not found\"}";
+        goto bad_request;
+    }
+    CHECK(
+        json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
+        "Couldn't get snippets");
+
+    CHECK(
+        evbuffer_add_reference(
+            resp,
+            bdata(json_str_res),
+            blength(json_str_res),
+            bstring_free_cb,
+            json_str_res) == 0,
+        "Couldn't append json to output buffer");
+
+    // bstring should be free by bstring_free_cb then
+    json_str_res = NULL;
+exit:
+    evhttp_clear_headers(&queries);
+    if (resp != NULL) {
+        evhttp_send_reply(req, ret_code, reason, resp);
+    } else {
+        evhttp_send_reply(req, ret_code, reason, NULL);
+    }
+    evbuffer_free(resp);
+    if (json_str_res != NULL) {
+        bdestroy(json_str_res);
+    }
+    return;
+
+error:
+    ret_code = 500;
+    reason = "Internal Server Error";
+    if (resp != NULL) {
+        evbuffer_drain(resp, evbuffer_get_length(resp));
+        if (evbuffer_add_printf(resp, "500") <= 0) {
+            evbuffer_free(resp);
+            resp = NULL;
+        };
+    }
+    goto exit;
+bad_request:
+    ret_code = 403;
+    reason = "Bad Request";
+    bad_request_msg = bad_request_msg == NULL ? "Bad request" : bad_request_msg;
+    CHECK(
+        evbuffer_add_printf(resp, "%s", bad_request_msg),
+        "Couldn't append to response buffer");
+    goto exit;
+}
 
 static void json_api_find_snippets(
     struct evhttp_request *req, const struct WNContext *wctx) {
@@ -122,8 +263,9 @@ static void json_api_find_snippets(
     int rc = 200;
     int err = 0;
     struct evbuffer *resp = NULL;
-    const struct evhttp_uri *euri = NULL;
     struct evkeyvalq queries;
+    struct bstrList *taglist = NULL;
+    const char *tmp_cstr = NULL;
     bstring json_str_res = NULL;
 
     resp = evbuffer_new();
@@ -134,11 +276,23 @@ static void json_api_find_snippets(
         "Content-Type",
         "application/json; charset=UTF-8");
 
-    euri = evhttp_request_get_evhttp_uri(req);
-    evhttp_parse_query_str(evhttp_uri_get_query(euri), &queries);
-    LOG_DEBUG(
-        "json_api_find_snippets got %s", evhttp_find_header(&queries, "title"));
-    json_str_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, NULL, &err);
+    CHECK(
+        evhttp_parse_query_str(
+            evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)),
+            &queries) == 0,
+        "Couldn't parse query str");
+
+    tmp_cstr = evhttp_find_header(&queries, "tags");
+    if (tmp_cstr != NULL) {
+        struct tagbstring tagstr = {0};
+        btfromcstr(tagstr, tmp_cstr);
+        LOG_DEBUG("%s, %s", tmp_cstr, bdata(&tagstr));
+        taglist = bsplit(&tagstr, ',');
+        CHECK(taglist != NULL, "Couldn't split tags string");
+    }
+
+    json_str_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, taglist, &err);
+
     CHECK(
         json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
         "Couldn't get snippets");
@@ -165,6 +319,9 @@ exit:
     if (json_str_res != NULL) {
         bdestroy(json_str_res);
     }
+    if (taglist != NULL) {
+        bstrListDestroy(taglist);
+    }
     return;
 
 error:
@@ -179,10 +336,69 @@ error:
     }
     goto exit;
 }
+
+static void json_api_delete_snippet(
+    struct evhttp_request *req, const struct WNContext *wctx) {
+    char *reason = "OK";
+    int rc = 200;
+    int err = 0;
+    struct evbuffer *resp = NULL;
+    struct evkeyvalq queries;
+    sqlite_int64 snippet_id = 0;
+    char *tmp_cstr = NULL;
+    char *bad_request_msg = NULL;
+    bstring json_str_res = NULL;
+
+    resp = evbuffer_new();
+    CHECK_MEM(resp);
+
+    evhttp_add_header(
+        evhttp_request_get_output_headers(req),
+        "Content-Type",
+        "application/json; charset=UTF-8");
+
+    CHECK(
+        evhttp_parse_query_str(
+            evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)),
+            &queries) == 0,
+        "Couldn't parse query str");
+
+    tmp_cstr = (char *)evhttp_find_header(&queries, "id");
+    if (tmp_cstr == NULL) {
+        bad_request_msg = "id is required when deleting snippet";
+        goto bad_request;
+    }
+    PARSE_INT(strtoll, tmp_cstr, snippet_id, rc);
+    if (rc == 1) {
+        bad_request_msg = "malformed id";
+        goto bad_request;
+    }
+    snippet_id = dbw_edit_snippet(
+        wctx->db_handle, snippet_id, NULL, NULL, NULL, NULL, 1, &err);
+    CHECK(
+        evbuffer_add_printf(
+            resp, "{\"status\": \"ok\", \"id\": %lld}", snippet_id) > 0,
+        "Couldn't append to response buffer");
+exit:
+    evhttp_clear_headers(&queries);
+    if (resp != NULL) {
+        evhttp_send_reply(req, rc, reason, resp);
+    } else {
+        evhttp_send_reply(req, rc, reason, NULL);
+    }
+    evbuffer_free(resp);
+    if (json_str_res != NULL) {
+        bdestroy(json_str_res);
+    }
+    return;
+
+    INTERNAL_ERROR_HANDLE;
+    BAD_REQ_HANDLE;
+}
 static void json_api_create_snippet(
     struct evhttp_request *req, const struct WNContext *wctx) {
     int rc = 200;
-    int ec = 0;
+    int err = 0;
     char *reason = "OK";
     char *cbuf = NULL;
     char *bad_request_msg = NULL;
@@ -192,15 +408,41 @@ static void json_api_create_snippet(
     struct bstrList *tags = NULL;
     struct tagbstring *tags_array = NULL;
     json_value *json = NULL;
-
-    tags = calloc(1, sizeof(struct bstrList));
-    CHECK_MEM(tags);
-
-    cbuf = malloc(BUF_LEN);
-    CHECK_MEM(cbuf);
+    sqlite_int64 snippet_id = 0;
+    struct evkeyvalq queries = {0};
+    char edit = 0;
+    bstring tmp_str = NULL;
+    char *tmp_cstr = NULL;
 
     resp = evbuffer_new();
     CHECK_MEM(resp);
+
+    CHECK(
+        evhttp_parse_query_str(
+            evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)),
+            &queries) == 0,
+        "Couldn't parse query str");
+
+    tmp_cstr = (char *)evhttp_find_header(&queries, "edit");
+    if (tmp_cstr != NULL) {
+        LOG_DEBUG("tmp_cstr %s", tmp_cstr);
+        if (biseqcstrcaseless(&__true, tmp_cstr)) {
+            edit = 1;
+            tmp_cstr = (char *)evhttp_find_header(&queries, "id");
+            if (tmp_cstr == NULL) {
+                bad_request_msg = "id is required when editing snippet";
+                goto bad_request;
+            }
+            PARSE_INT(strtoll, tmp_cstr, snippet_id, rc);
+            if (rc == 1) {
+                bad_request_msg = "malformed id";
+                goto bad_request;
+            }
+        }
+    }
+
+    cbuf = malloc(BUF_LEN);
+    CHECK_MEM(cbuf);
 
     json_str = bfromcstralloc(BUF_LEN, "");
     CHECK_MEM(json_str);
@@ -259,26 +501,45 @@ static void json_api_create_snippet(
     json_value *jtitle = NULL, *jcontent = NULL, *jtype = NULL;
 
     JSON_GET_ITEM(json, jtitle, "title");
-    if (jtitle == NULL || jtitle->type != json_string) {
-        bad_request_msg = "title required and must be string";
-        goto bad_request;
-    }
-
     JSON_GET_ITEM(json, jcontent, "content");
-    if (jcontent == NULL || jcontent->type != json_string) {
-        bad_request_msg = "content required and must be string";
-        goto bad_request;
-    }
-
     JSON_GET_ITEM(json, jtype, "type");
-    if (jtype == NULL || jtype->type != json_string) {
-        bad_request_msg = "type required and must be string";
-        goto bad_request;
-    }
+
+// In this macro we check that json values we got above are strings
+// and that they are not NULL if we are creating snippet (not editing)
+// otherwise just check they are strings, and then assign they to the
+// corresponging tagbstrings
+#define CHECK_J(tbstr, edit)                                             \
+    do {                                                                 \
+        if (!(edit)) {                                                   \
+            if ((j##tbstr) == NULL || (j##tbstr)->type != json_string) { \
+                bad_request_msg = #tbstr " required and must be string"; \
+                goto bad_request;                                        \
+            }                                                            \
+        } else {                                                         \
+            if ((j##tbstr) != NULL && (j##tbstr)->type != json_string) { \
+                bad_request_msg = #tbstr " must be string";              \
+                goto bad_request;                                        \
+            }                                                            \
+        }                                                                \
+        if ((j##tbstr) != NULL) {                                        \
+            btfromcstr(tbstr, (j##tbstr)->u.string.ptr);                 \
+        }                                                                \
+    } while (0)
+
+    CHECK_J(title, edit);
+    CHECK_J(content, edit);
+    CHECK_J(type, edit);
+    LOG_DEBUG("type is %s", bdata(&type));
+    LOG_DEBUG("title is %s", bdata(&title));
+
+#undef CHECK_J
 
     json_value *jtags = NULL;
     JSON_GET_ITEM(json, jtags, "tags");
     if (jtags != NULL && jtags->type == json_array) {
+
+        tags = calloc(1, sizeof(struct bstrList));
+        CHECK_MEM(tags);
 
         /* Manual bstrList handling to eliminate unnecessary mallocs */
         tags->entry = calloc(jtags->u.array.length, sizeof(bstring));
@@ -302,20 +563,29 @@ static void json_api_create_snippet(
         tags->mlen = -1;
     }
 
-    btfromcstr(title, jtitle->u.string.ptr);
-    btfromcstr(content, jcontent->u.string.ptr);
-    btfromcstr(type, jtype->u.string.ptr);
-
-    ec = dbw_new_snippet(wctx->db_handle, &title, &content, &type, tags);
-    if (ec == DBW_ERR_NOT_FOUND) {
+    if (edit) {
+        snippet_id = dbw_edit_snippet(
+            wctx->db_handle,
+            snippet_id,
+            &title,
+            &content,
+            &type,
+            tags,
+            0,
+            &err);
+    } else {
+        snippet_id = dbw_new_snippet(
+            wctx->db_handle, &title, &content, &type, tags, &err);
+    }
+    if (err == DBW_ERR_NOT_FOUND) {
         bad_request_msg = "wrong type";
         goto bad_request;
-    } else if (ec == DBW_ERR_ALREADY_EXISTS) {
+    } else if (err == DBW_ERR_ALREADY_EXISTS) {
         bad_request_msg = "already exists error. possibly snippet with this "
                           "title alredy exists";
         goto bad_request;
 
-    } else if (ec != DBW_OK) {
+    } else if (err != DBW_OK) {
         goto error;
     }
 
@@ -325,7 +595,9 @@ static void json_api_create_snippet(
         "application/json");
 
     CHECK(
-        evbuffer_add_printf(resp, "OK"), "Couldn't append to response buffer");
+        evbuffer_add_printf(
+            resp, "{\"status\": \"ok\", \"id\": %lld}", snippet_id) > 0,
+        "Couldn't append to response buffer");
 
 exit:
     if (tags != NULL) {
@@ -343,6 +615,9 @@ exit:
     if (json != NULL) {
         json_value_free(json);
     }
+    if (tmp_str != NULL) {
+        bdestroy(tmp_str);
+    }
     if (resp != NULL) {
         evhttp_send_reply(req, rc, reason, resp);
     } else {
@@ -351,39 +626,27 @@ exit:
     evbuffer_free(resp);
     return;
 
-error:
-    rc = 500;
-    reason = "Internal Server Error";
-    if (resp != NULL) {
-        evbuffer_drain(resp, evbuffer_get_length(resp));
-        if (evbuffer_add_printf(resp, "500") <= 0) {
-            evbuffer_free(resp);
-            resp = NULL;
-        };
-    }
-    goto exit;
-
-bad_request:
-    rc = 403;
-    reason = "Bad Request";
-    bad_request_msg = bad_request_msg == NULL ? "Bad request" : bad_request_msg;
-    CHECK(
-        evbuffer_add_printf(resp, "%s", bad_request_msg),
-        "Couldn't append to response buffer");
-    goto exit;
+    INTERNAL_ERROR_HANDLE;
+    BAD_REQ_HANDLE;
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
     int rc = 0;
     rc = 0;
     int err = 0;
     struct event_base *base = NULL;
     struct evhttp *http = NULL;
     struct evhttp_bound_socket *handle = NULL;
-    struct tagbstring dbpath = bsStatic("./test.db");
+    struct tagbstring dbpath = {0};
     struct WNContext *wctx = NULL;
     struct event *intterm_event = NULL;
     DBWHandler *db = NULL;
+
+    if (argc != 2) {
+        goto usage;
+    }
+
+    btfromcstr(dbpath, argv[1]);
 
     CHECK((base = event_base_new()) != NULL, "Couldn't initialize event base");
     CHECK((http = evhttp_new(base)) != NULL, "Couldn't initialize http handle");
@@ -415,6 +678,18 @@ int main(void) {
         (void (*)(struct evhttp_request *, void *))json_api_find_snippets,
         wctx);
 
+    evhttp_set_cb(
+        http,
+        "/api/get_snippet",
+        (void (*)(struct evhttp_request *, void *))json_api_get_snippet,
+        wctx);
+
+    evhttp_set_cb(
+        http,
+        "/api/delete_snippet",
+        (void (*)(struct evhttp_request *, void *))json_api_delete_snippet,
+        wctx);
+
     evhttp_set_gencb(
         http, (void (*)(struct evhttp_request *, void *))json_api_cb, wctx);
 
@@ -442,4 +717,7 @@ exit:
 error:
     rc = 1;
     goto exit;
+usage:
+    printf(USAGE, argv[0]);
+    goto error;
 }

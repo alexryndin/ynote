@@ -1,0 +1,42 @@
+.content {
+    width: 80%;
+}
+
+code {
+  margin-bottom: var(--spacing);
+}
+
+/* ------------------------------
+ * Bar for messages
+ * https://code-boxx.com/simple-css-error-messages/
+ * ------------------------------
+*/
+.bar {
+    padding: 10px;
+    margin: 10px;
+    margin-left: 0;
+    margin-right: 0;
+    color: #333;
+    background: #fafafa;
+    border: 1px solid #ccc;
+}
+.info {
+    color: #204a8e;
+    background: #c9ddff;
+    border: 1px solid #4c699b;
+}
+.success {
+    color: #2b7515;
+    background: #ecffd6;
+    border: 1px solid #617c42;
+}
+.warn {
+    color: #756e15;
+    background: #fffbd1;
+    border: 1px solid #87803e;
+}
+.error {
+    color: #ba3939;
+    background: #ffe0e0;
+    border: 1px solid #a33a3a;
+}

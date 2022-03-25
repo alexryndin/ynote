@@ -7,6 +7,19 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 
+#define STR_APPEND_PATTERN(str, pattern, num)                                 \
+    bstring question_marks = bfromcstr((pattern));                            \
+    CHECK(question_marks != NULL, "Couldn't create query string");            \
+                                                                              \
+    /* As many question marks as many tags we have */                         \
+    CHECK(                                                                    \
+        bpattern(question_marks, (sizeof(pattern) - 1) * (num)-1) == BSTR_OK, \
+        "Couldnt create query string");                                       \
+    CHECK(                                                                    \
+        bconcat((str), question_marks) == BSTR_OK,                            \
+        "Couldn't create query string");                                      \
+    CHECK(bdestroy(question_marks) == BSTR_OK, "Couldn't destroy string");
+
 #define CHECK_JSON_OBJ_PUSH(json, field_name, obj)                 \
     do {                                                           \
         CHECK(                                                     \
@@ -28,19 +41,23 @@
 #define TAGS_TABLE            "tags"
 #define SNIPPET_TO_TAGS_TABLE "snippet_to_tags"
 
-const struct tagbstring _insert_snippet_sql =
+static const struct tagbstring _insert_snippet_sql =
     bsStatic("INSERT INTO " SNIPPETS_TABLE
              " (title, content, type) VALUES (?, ?, ?) RETURNING id");
 
-const struct tagbstring _insert_snippet_to_tags_sql = bsStatic(
+static const struct tagbstring _update_snippet_sql =
+    bsStatic("UPDATE " SNIPPETS_TABLE " SET deleted =  ");
+
+static const struct tagbstring _insert_snippet_to_tags_sql = bsStatic(
     "INSERT OR IGNORE INTO " SNIPPET_TO_TAGS_TABLE
     " (snippet_id, tag_id) SELECT ?, id FROM " TAGS_TABLE " WHERE name IN (");
 
-const struct tagbstring _select_snippets = bsStatic(
+static const struct tagbstring _select_snippets_sql = bsStatic(
     "SELECT json_object('status', 'ok', 'result', result) from ("
     "  SELECT json_object("
     "    'id', json_group_array(id),"
     "    'title', json_group_array(title),"
+    "    'content', json_group_array(content),"
     "    'type', json_group_array(type),"
     "    'created', json_group_array(created),"
     "    'updated', json_group_array(updated),"
@@ -49,19 +66,57 @@ const struct tagbstring _select_snippets = bsStatic(
     "  FROM ("
     "    SELECT " SNIPPETS_TABLE ".id as id,"
     "           title,"
-    "           content,"
+    "           CASE"
+    "             WHEN length(content) < 51"
+    "             THEN content"
+    "             ELSE substr(content, 1, 50) || '...'"
+    "           END as content,"
     "           snippet_types.name as type,"
     "           datetime(created, 'localtime') as created,"
     "           datetime(updated, 'localtime') as updated,"
     "           json_group_array(tags.name) as tags FROM " SNIPPETS_TABLE
-    "             JOIN " SNIPPET_TYPES_TABLE " ON " SNIPPETS_TABLE
-    ".id = " SNIPPET_TYPES_TABLE ".id"
-    "             JOIN " SNIPPET_TO_TAGS_TABLE " ON " SNIPPETS_TABLE
+    "             LEFT JOIN " SNIPPET_TYPES_TABLE " ON " SNIPPETS_TABLE
+    ".type = " SNIPPET_TYPES_TABLE ".id"
+    "             LEFT JOIN " SNIPPET_TO_TAGS_TABLE " ON " SNIPPETS_TABLE
     ".id = " SNIPPET_TO_TAGS_TABLE ".snippet_id"
-    "             JOIN " TAGS_TABLE " ON " SNIPPET_TO_TAGS_TABLE
+    "             LEFT JOIN " TAGS_TABLE " ON " SNIPPET_TO_TAGS_TABLE
     ".tag_id = " TAGS_TABLE ".id"
-    "    WHERE 1=1 GROUP BY " SNIPPETS_TABLE ".id"
+    "    WHERE deleted=FALSE %s GROUP BY " SNIPPETS_TABLE ".id %s"
     "  ))");
+
+static const struct tagbstring _get_snippet_sql = bsStatic(
+    "SELECT json_object('status', 'ok', 'result', result)"
+    "FROM ("
+    "  SELECT"
+    "    json_object("
+    "      'id', id,"
+    "      'title', title,"
+    "      'content', content ,"
+    "      'type', type,"
+    "      'created', created,"
+    "      'updated', updated,"
+    "      'tags', tags"
+    "    ) AS result"
+    "  FROM ("
+    "    SELECT * FROM ("
+    "      SELECT snippets.id as id,"
+    "             title,"
+    "             content,"
+    "             snippet_types.name AS type,"
+    "             datetime(created, 'localtime') AS created,"
+    "             datetime(updated, 'localtime') AS updated,"
+    "             json_group_array(tags.name) AS tags FROM " SNIPPETS_TABLE
+    "               LEFT JOIN " SNIPPET_TYPES_TABLE " ON " SNIPPETS_TABLE
+    "  .type = " SNIPPET_TYPES_TABLE ".id"
+    "               LEFT JOIN " SNIPPET_TO_TAGS_TABLE " ON " SNIPPETS_TABLE
+    "  .id = " SNIPPET_TO_TAGS_TABLE ".snippet_id"
+    "               LEFT JOIN " TAGS_TABLE " ON " SNIPPET_TO_TAGS_TABLE
+    "  .tag_id = " TAGS_TABLE ".id"
+    "      WHERE " SNIPPETS_TABLE ".id=?"
+    "    )"
+    "    WHERE title IS NOT NULL "
+    "  )"
+    ")");
 
 // statics and helpers
 static struct tagbstring __integer = bsStatic("integer");
@@ -72,21 +127,16 @@ static DBWResult *DBWResult_create(int t);
 // ******************************
 // * SQLite
 // ******************************
-
-static bstring sqlite3_find_snippets(
-    DBWHandler *h,
-    const bstring title,
-    const bstring type,
-    const struct bstrList *tags,
-    int *ret_err) {
+//
+static bstring
+sqlite3_get_snippet(DBWHandler *h, sqlite_int64 id, int *ret_err) {
     int err = 0;
-    int rc = SQLITE_OK;
     sqlite3_stmt *stmt = NULL;
     const unsigned char *tmp_text_res = NULL;
     bstring ret = NULL;
     bstring q = NULL;
 
-    q = bstrcpy((bstring)&_select_snippets);
+    q = bstrcpy((bstring)&_get_snippet_sql);
     CHECK(q != NULL, "Couldn't create query string");
 
     CHECK(
@@ -97,6 +147,124 @@ static bstring sqlite3_find_snippets(
 
     LOG_DEBUG("query: %s", bdata(q));
 
+    CHECK(
+        sqlite3_bind_int64(stmt, 1, id) == SQLITE_OK,
+        "Couldn't bind parameter to statement");
+
+    err = sqlite3_step(stmt);
+    LOG_DEBUG("%s", sqlite3_errstr(err));
+    switch (err) {
+    case SQLITE_DONE:
+        if (ret_err != NULL) {
+            *ret_err = DBW_ERR_NOT_FOUND;
+            goto error;
+        }
+        break;
+    case SQLITE_ROW:
+        tmp_text_res = sqlite3_column_text(stmt, 0);
+        CHECK(
+            tmp_text_res != NULL,
+            "Couldn't fetch result set from db: %s",
+            sqlite3_errmsg(h->conn));
+
+        ret = bfromcstr((char *)tmp_text_res);
+        CHECK(ret != NULL, "Couldn't gerenare result string");
+        break;
+    default:
+        LOG_ERR("Couldn't get row from table: %s", sqlite3_errmsg(h->conn));
+        goto error;
+    }
+
+    bdestroy(q);
+    q = NULL;
+
+    if (ret_err != NULL) {
+        *ret_err = DBW_OK;
+    }
+
+    /* fallthrough */
+exit:
+    if (stmt != NULL) {
+        sqlite3_finalize(stmt);
+    }
+    if (q != NULL) {
+        bdestroy(q);
+    }
+    return ret;
+error:
+    if (ret_err != NULL && *ret_err == DBW_OK) {
+        *ret_err = DBW_ERR;
+    }
+    if (ret != NULL) {
+        bdestroy(ret);
+    }
+    goto exit;
+}
+
+static bstring sqlite3_find_snippets(
+    DBWHandler *h,
+    const bstring title,
+    const bstring type,
+    const struct bstrList *tags,
+    int *ret_err) {
+    int err = 0;
+    sqlite3_stmt *stmt = NULL;
+    const unsigned char *tmp_text_res = NULL;
+    bstring ret = NULL;
+    bstring q = NULL;
+    bstring where_clause = NULL;
+    bstring having_clause = NULL;
+
+    where_clause = bfromcstr("");
+    CHECK(where_clause != NULL, "Couldn't create query string");
+    having_clause = bfromcstr("");
+    CHECK(having_clause != NULL, "Couldn't create query string");
+
+    if (tags != NULL && tags->qty > 0) {
+        bcatcstr(where_clause, " AND " TAGS_TABLE ".name IN (");
+        STR_APPEND_PATTERN(where_clause, "?,", tags->qty);
+        CHECK(
+            bconchar(where_clause, ')') == BSTR_OK,
+            "Couldn't create query string");
+        CHECK(
+            bcatcstr(
+                having_clause,
+                " HAVING COUNT(" SNIPPET_TO_TAGS_TABLE
+                ".tag_id) >= ?") == BSTR_OK,
+            "Couldn't create query string");
+    }
+
+    q = bformat(
+        bdata(&_select_snippets_sql),
+        bdata(where_clause),
+        bdata(having_clause));
+    CHECK(q != NULL, "Couldn't create query string");
+
+    LOG_DEBUG("query: %s", bdata(q));
+    CHECK(
+        sqlite3_prepare_v2(h->conn, bdata(q), blength(q) + 1, &stmt, NULL) ==
+            SQLITE_OK,
+        "Couldn't prepare statement: %s",
+        sqlite3_errmsg(h->conn));
+
+    int binding_field = 0;
+    if (tags != NULL) {
+        for (binding_field = 0; binding_field < tags->qty; binding_field++) {
+            CHECK(
+                sqlite3_bind_text(
+                    stmt,
+                    1 + binding_field,
+                    bdata(tags->entry[binding_field]),
+                    -1,
+                    NULL) == SQLITE_OK,
+                "Couldn't bind parameter (tag %s) to statement: %s",
+                bdata(tags->entry[binding_field]),
+                sqlite3_errmsg(h->conn));
+        }
+        CHECK(
+            sqlite3_bind_int64(stmt, binding_field + 1, tags->qty) == SQLITE_OK,
+            "Couldn't bind parameter to statement");
+    }
     while ((err = sqlite3_step(stmt)) != SQLITE_DONE) {
         switch (err) {
         case SQLITE_ROW:
@@ -130,6 +298,9 @@ exit:
     if (q != NULL) {
         bdestroy(q);
     }
+    if (where_clause != NULL) {
+        bdestroy(where_clause);
+    }
     return ret;
 error:
     if (ret_err != NULL) {
@@ -141,14 +312,278 @@ error:
     goto exit;
 }
 
-static int sqlite3_new_snippet(
+static sqlite3_int64 sqlite3_edit_snippet(
+    DBWHandler *h,
+    const sqlite3_int64 snippet_id,
+    const bstring title,
+    const bstring snippet,
+    const bstring type,
+    const struct bstrList *tags,
+    char deleted,
+    int *ret_err) {
+    int err = 0;
+    sqlite3_int64 ret = 0;
+    int rc = 0;
+    sqlite3_int64 type_id = 0;
+    sqlite3_stmt *stmt = NULL;
+
+    bstring q = NULL;
+
+    // Step 1: get corresponding snippet type
+    if (type != NULL) {
+        const struct tagbstring check_type_sql =
+            bsStatic("SELECT id FROM snippet_types WHERE name = ?;");
+
+        CHECK(
+            sqlite3_prepare_v2(
+                h->conn,
+                bdata(&check_type_sql),
+                blength(&check_type_sql) + 1,
+                &stmt,
+                NULL) == SQLITE_OK,
+            "Couldn't prepare statement: %s",
+            sqlite3_errmsg(h->conn));
+
+        CHECK(
+            sqlite3_bind_text(stmt, 1, bdata(type), -1, NULL) == SQLITE_OK,
+            "Couldn't bind parameter to statement");
+
+        CHECKRC(
+            sqlite3_step(stmt) == SQLITE_ROW,
+            DBW_ERR_NOT_FOUND,
+            "Couldn't get snippet type %s",
+            bdata(type));
+
+        type_id = sqlite3_column_int64(stmt, 0);
+        CHECK(
+            sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+        stmt = NULL;
+    }
+
+    // Step 2: ensure all tags are present in tags table
+    if (tags != NULL && tags->qty > 0) {
+        q = bfromcstr("INSERT OR IGNORE INTO " TAGS_TABLE " (name) VALUES ");
+        CHECK(q != NULL, "Couldn't create query string");
+
+        STR_APPEND_PATTERN(q, "(?),", tags->qty);
+
+        CHECK(
+            sqlite3_prepare_v2(
+                h->conn, bdata(q), blength(q) + 1, &stmt, NULL) == SQLITE_OK,
+            "Couldn't prepare statement: %s",
+            sqlite3_errmsg(h->conn));
+
+        LOG_DEBUG("Statement is %s", bdata(q));
+
+        for (int i = 0; i < tags->qty; i++) {
+            CHECK(
+                sqlite3_bind_text(
+                    stmt, 1 + i, bdata(tags->entry[i]), -1, NULL) == SQLITE_OK,
+                "Couldn't bind parameter (tag %s) to statement: %s",
+                bdata(tags->entry[i]),
+                sqlite3_errmsg(h->conn));
+        }
+
+        CHECK(sqlite3_step(stmt) == SQLITE_DONE, "Couldn't insert tags");
+
+        CHECK(
+            sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+        CHECK(bdestroy(q) == BSTR_OK, "Coudln't destroy string");
+        q = NULL;
+    }
+
+    // Step 3: update snippet
+    if (bdata(title) != NULL || bdata(snippet) != NULL || bdata(type) != NULL ||
+        deleted) {
+        q = bstrcpy((bstring)&_update_snippet_sql);
+        CHECK(q != NULL, "Couldn't create query string");
+        char *_deleted = deleted ? "TRUE," : "FALSE,";
+        CHECK(bcatcstr(q, _deleted) == BSTR_OK, "Couldn't create query string");
+        if (bdata(title) != NULL) {
+            CHECK(
+                bcatcstr(q, "title = ?1,") == BSTR_OK,
+                "Couldn't create query string");
+        }
+        if (bdata(snippet) != NULL) {
+            CHECK(
+                bcatcstr(q, "content = ?2,") == BSTR_OK,
+                "Couldn't create query string");
+        }
+        if (bdata(type) != NULL) {
+            CHECK(
+                bcatcstr(q, "type = ?3,") == BSTR_OK,
+                "Couldn't create query string");
+        }
+
+        // remove trailig ,
+        bdata(q)[--q->slen] = '\0';
+
+        CHECK(
+            bcatcstr(q, " WHERE id = ?4;") == BSTR_OK,
+            "Couldn't create query string");
+
+        LOG_DEBUG("query %s", bdata(q));
+
+        CHECK(
+            sqlite3_prepare_v2(
+                h->conn, bdata(q), blength(q) + 1, &stmt, NULL) == SQLITE_OK,
+            "Couldn't prepare statement: %s",
+            sqlite3_errmsg(h->conn));
+
+        LOG_DEBUG("title is %s", bdata(title));
+        if (bdata(title) != NULL) {
+            CHECK(
+                sqlite3_bind_text(stmt, 1, bdata(title), -1, NULL) == SQLITE_OK,
+                "Couldn't bind parameter to statement");
+        }
+
+        if (bdata(snippet) != NULL) {
+            CHECK(
+                sqlite3_bind_text(stmt, 2, bdata(snippet), -1, NULL) ==
+                    SQLITE_OK,
+                "Couldn't bind parameter to statement");
+        }
+
+        if (bdata(type) != NULL) {
+            CHECK(
+                sqlite3_bind_int64(stmt, 3, type_id) == SQLITE_OK,
+                "Couldn't bind parameter to statement");
+        }
+        LOG_DEBUG("snippet id is %lld", snippet_id);
+        CHECK(
+            sqlite3_bind_int64(stmt, 4, snippet_id) == SQLITE_OK,
+            "Couldn't bind parameter to statement");
+
+        err = sqlite3_step(stmt);
+        if (err != SQLITE_DONE) {
+            LOG_ERR("Couldn't update snippet, %s", sqlite3_errmsg(h->conn));
+            if (err == SQLITE_CONSTRAINT) {
+                rc = DBW_ERR_ALREADY_EXISTS;
+            }
+            goto error;
+        }
+
+        CHECK(
+            sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+        CHECK(bdestroy(q) == BSTR_OK, "Coudln't destroy string");
+        q = NULL;
+        stmt = NULL;
+    }
+
+    if (tags != NULL) {
+        // Step 4: bind snippet to tags
+        if (tags->qty > 0) {
+            q = bstrcpy((bstring)&_insert_snippet_to_tags_sql);
+            CHECK(q != NULL, "Couldn't create query string");
+
+            STR_APPEND_PATTERN(q, "?,", tags->qty);
+            CHECK(bconchar(q, ')') == BSTR_OK, "Couldn't create query string");
+
+            CHECK(
+                sqlite3_prepare_v2(
+                    h->conn, bdata(q), blength(q) + 1, &stmt, NULL) ==
+                    SQLITE_OK,
+                "Couldn't prepare statement: %s",
+                sqlite3_errmsg(h->conn));
+
+            CHECK(
+                sqlite3_bind_int64(stmt, 1, snippet_id) == SQLITE_OK,
+                "Couldn't bind parameter to statement");
+
+            LOG_DEBUG("query: %s", bdata(q));
+
+            for (int i = 0; i < tags->qty; i++) {
+                CHECK(
+                    sqlite3_bind_text(
+                        stmt, 2 + i, bdata(tags->entry[i]), -1, NULL) ==
+                        SQLITE_OK,
+                    "Couldn't bind parameter (tag %s) to statement: %s",
+                    bdata(tags->entry[i]),
+                    sqlite3_errmsg(h->conn));
+            }
+            err = sqlite3_step(stmt);
+            if (err != SQLITE_DONE) {
+                LOG_ERR(
+                    "Couldn't bind snippet to tags, %s",
+                    sqlite3_errmsg(h->conn));
+                goto error;
+            }
+            CHECK(
+                sqlite3_finalize(stmt) == SQLITE_OK,
+                "Couldn't finalize statement");
+            stmt = NULL;
+            CHECK(bdestroy(q) == BSTR_OK, "Coudln't destroy string");
+        }
+        // Step 5: unlink unnecessary tags
+        if (tags->qty > 0) {
+            q = bfromcstr("DELETE FROM " SNIPPET_TO_TAGS_TABLE
+                          " WHERE snippet_id = ? AND tag_id NOT IN (SELECT id "
+                          "FROM " TAGS_TABLE " WHERE name IN (");
+            STR_APPEND_PATTERN(q, "?,", tags->qty);
+            CHECK(bcatcstr(q, "))") == BSTR_OK, "Couldn't create query string");
+        } else {
+            q = bfromcstr("DELETE FROM " SNIPPET_TO_TAGS_TABLE
+                          " WHERE snippet_id = ?");
+        }
+        LOG_DEBUG("query = %s, id = %lld", bdata(q), snippet_id);
+
+        CHECK(
+            sqlite3_prepare_v2(
+                h->conn, bdata(q), blength(q) + 1, &stmt, NULL) == SQLITE_OK,
+            "Couldn't prepare statement: %s",
+            sqlite3_errmsg(h->conn));
+        CHECK(
+            sqlite3_bind_int64(stmt, 1, snippet_id) == SQLITE_OK,
+            "Couldn't bind parameter to statement");
+        for (int i = 0; i < tags->qty; i++) {
+            CHECK(
+                sqlite3_bind_text(
+                    stmt, 2 + i, bdata(tags->entry[i]), -1, NULL) == SQLITE_OK,
+                "Couldn't bind parameter (tag %s) to statement: %s",
+                bdata(tags->entry[i]),
+                sqlite3_errmsg(h->conn));
+        }
+        err = sqlite3_step(stmt);
+        if (err != SQLITE_DONE) {
+            LOG_ERR(
+                "Couldn't bind snippet to tags, %s", sqlite3_errmsg(h->conn));
+            goto error;
+        }
+        CHECK(
+            sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+        stmt = NULL;
+    }
+    if (ret_err != NULL) {
+        *ret_err = DBW_OK;
+    }
+
+    ret = snippet_id;
+
+exit:
+    if (stmt != NULL) {
+        sqlite3_finalize(stmt);
+    }
+    if (q != NULL) {
+        bdestroy(q);
+    }
+    return ret;
+error:
+    if (ret_err != NULL && *ret_err == DBW_OK) {
+        *ret_err = rc == DBW_OK ? DBW_ERR : rc;
+    }
+    goto exit;
+}
+
+static sqlite3_int64 sqlite3_new_snippet(
     DBWHandler *h,
     const bstring title,
     const bstring snippet,
     const bstring type,
-    const struct bstrList *tags) {
+    const struct bstrList *tags,
+    int *ret_err) {
     int err = 0;
-    int rc = SQLITE_OK;
+    sqlite3_int64 ret = 0;
+    int rc = 0;
     sqlite3_int64 type_id = 0;
     sqlite3_int64 snippet_id = 0;
     sqlite3_stmt *stmt = NULL;
@@ -260,51 +695,59 @@ static int sqlite3_new_snippet(
 
     snippet_id = sqlite3_column_int64(stmt, 0);
     CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+    stmt = NULL;
 
     // Step 4: bind snippet to tags
-    q = bstrcpy((bstring)&_insert_snippet_to_tags_sql);
-    CHECK(q != NULL, "Couldn't create query string");
+    if (tags->qty > 0) {
+        q = bstrcpy((bstring)&_insert_snippet_to_tags_sql);
+        CHECK(q != NULL, "Couldn't create query string");
 
-    question_marks = bfromcstr("?,");
-    // As many question marks as many tags we have
-    CHECK(question_marks != NULL, "Couldn't create query string");
-    CHECK(
-        bpattern(question_marks, 2 * tags->qty - 1) == BSTR_OK,
-        "Couldn't create query string");
-    CHECK(
-        bconcat(q, question_marks) == BSTR_OK, "Couldn't create query string");
-    bdestroy(question_marks);
-    question_marks = NULL;
-    CHECK(bconchar(q, ')') == BSTR_OK, "Couldn't create query string");
-
-    CHECK(
-        sqlite3_prepare_v2(h->conn, bdata(q), blength(q) + 1, &stmt, NULL) ==
-            SQLITE_OK,
-        "Couldn't prepare statement: %s",
-        sqlite3_errmsg(h->conn));
-
-    CHECK(
-        sqlite3_bind_int64(stmt, 1, snippet_id) == SQLITE_OK,
-        "Couldn't bind parameter to statement");
-
-    LOG_DEBUG("query: %s", bdata(q));
-
-    for (int i = 0; i < tags->qty; i++) {
+        question_marks = bfromcstr("?,");
+        // As many question marks as many tags we have
+        CHECK(question_marks != NULL, "Couldn't create query string");
         CHECK(
-            sqlite3_bind_text(stmt, 2 + i, bdata(tags->entry[i]), -1, NULL) ==
-                SQLITE_OK,
-            "Couldn't bind parameter (tag %s) to statement: %s",
-            bdata(tags->entry[i]),
+            bpattern(question_marks, 2 * tags->qty - 1) == BSTR_OK,
+            "Couldn't create query string");
+        CHECK(
+            bconcat(q, question_marks) == BSTR_OK,
+            "Couldn't create query string");
+        bdestroy(question_marks);
+        question_marks = NULL;
+        CHECK(bconchar(q, ')') == BSTR_OK, "Couldn't create query string");
+
+        CHECK(
+            sqlite3_prepare_v2(
+                h->conn, bdata(q), blength(q) + 1, &stmt, NULL) == SQLITE_OK,
+            "Couldn't prepare statement: %s",
             sqlite3_errmsg(h->conn));
-    }
-    err = sqlite3_step(stmt);
-    if (err != SQLITE_DONE) {
-        LOG_ERR("Couldn't bind snippet to tags, %s", sqlite3_errmsg(h->conn));
-        goto error;
+
+        CHECK(
+            sqlite3_bind_int64(stmt, 1, snippet_id) == SQLITE_OK,
+            "Couldn't bind parameter to statement");
+
+        LOG_DEBUG("query: %s", bdata(q));
+
+        for (int i = 0; i < tags->qty; i++) {
+            CHECK(
+                sqlite3_bind_text(
+                    stmt, 2 + i, bdata(tags->entry[i]), -1, NULL) == SQLITE_OK,
+                "Couldn't bind parameter (tag %s) to statement: %s",
+                bdata(tags->entry[i]),
+                sqlite3_errmsg(h->conn));
+        }
+        err = sqlite3_step(stmt);
+        if (err != SQLITE_DONE) {
+            LOG_ERR(
+                "Couldn't bind snippet to tags, %s", sqlite3_errmsg(h->conn));
+            goto error;
+        }
     }
 
-    bdestroy(q);
-    q = NULL;
+    if (ret_err != NULL) {
+        *ret_err = DBW_OK;
+    }
+
+    ret = snippet_id;
 
 exit:
     if (stmt != NULL) {
@@ -316,10 +759,10 @@ exit:
     if (question_marks != NULL) {
         bdestroy(question_marks);
     }
-    return rc;
+    return ret;
 error:
-    if (rc == DBW_OK) {
-        rc = DBW_ERR;
+    if (ret_err != NULL && *ret_err == DBW_OK) {
+        *ret_err = rc == DBW_OK ? DBW_ERR : rc;
     }
     goto exit;
 }
@@ -353,8 +796,8 @@ static DBWHandler *sqlite3_connect(const bstring filename, int *err) {
      * CHECK(is_loading_enabled == 1, "Couldn't allow sqlite to load
      * extensions");
      *
-     * rc = sqlite3_load_extension(db, "./extension-functions", NULL, &err_str);
-     * CHECK(rc == 0, "Couldn't load extensions: %s", err_str);
+     * rc = sqlite3_load_extension(db, "./extension-functions", NULL,
+     * &err_str); CHECK(rc == 0, "Couldn't load extensions: %s", err_str);
      */
 
     h->conn = db;
@@ -555,7 +998,8 @@ error:
 int DBWResult_destroy(DBWResult *res) {
     CHECK(res != NULL, "Null result");
     while (rv_len(res->head_vec) > 0) {
-        // thanks to type magic, we are sure that head_vec contains bstrings...
+        // thanks to type magic, we are sure that head_vec contains
+        // bstrings...
         bdestroy(rv_pop(res->head_vec, NULL));
     }
     rv_destroy(res->head_vec);
@@ -629,18 +1073,19 @@ error:
     return NULL;
 }
 
-int dbw_new_snippet(
+sqlite_int64 dbw_new_snippet(
     DBWHandler *h,
     const bstring title,
     const bstring snippet,
     const bstring type,
-    const struct bstrList *tags) {
+    const struct bstrList *tags,
+    int *err) {
 
     CHECK(title != NULL && bdata(title) != NULL, "Null title");
     CHECK(snippet != NULL && bdata(snippet) != NULL, "Null snippet");
     CHECK(type != NULL && bdata(type) != NULL, "Null type");
     CHECK(tags != NULL, "Null tags");
-    CHECK(tags->qty > 0 && tags->qty < 100, "Too many tags");
+    CHECK(tags->qty >= 0 && tags->qty < 100, "Too many tags");
 
     for (int i = 0; i < tags->qty; i++) {
         LOG_DEBUG("Got tag %s", bdata(tags->entry[i]));
@@ -653,11 +1098,76 @@ int dbw_new_snippet(
     CHECK(bdata(type)[blength(type)] == '\0', "String must be nul terminated");
 
     if (h->DBWDBType == DBW_SQLITE3)
-        return sqlite3_new_snippet(h, title, snippet, type, tags);
+        return sqlite3_new_snippet(h, title, snippet, type, tags, err);
 
     return DBW_ERR_UNKN_DB;
 error:
-    return DBW_ERR;
+    if (err != NULL) {
+        *err = DBW_ERR;
+    }
+    return -1;
+}
+
+sqlite_int64 dbw_edit_snippet(
+    DBWHandler *h,
+    const sqlite_int64 id,
+    const bstring title,
+    const bstring snippet,
+    const bstring type,
+    const struct bstrList *tags,
+    char deleted,
+    int *err) {
+
+    if (tags != NULL) {
+        CHECK(tags->qty >= 0 && tags->qty < 100, "Too many tags");
+    }
+
+    if (bdata(title) != NULL) {
+        CHECK(
+            bdata(title)[blength(title)] == '\0',
+            "String must be nul terminated");
+    }
+    if (bdata(snippet) != NULL) {
+        CHECK(
+            bdata(snippet)[blength(snippet)] == '\0',
+            "String must be nul terminated");
+    }
+    if (bdata(type) != NULL) {
+        CHECK(
+            bdata(type)[blength(type)] == '\0',
+            "String must be nul terminated");
+    }
+
+    // CHECK(tags != NULL, "Null tags");
+
+    if (h->DBWDBType == DBW_SQLITE3)
+        return sqlite3_edit_snippet(
+            h, id, title, snippet, type, tags, deleted, err);
+
+    return DBW_ERR_UNKN_DB;
+error:
+    if (err != NULL) {
+        *err = DBW_ERR;
+    }
+    return -1;
+}
+
+bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, int *err) {
+
+    if (h->DBWDBType == DBW_SQLITE3)
+        return sqlite3_get_snippet(h, id, err);
+    else {
+        if (err != NULL) {
+            *err = DBW_ERR_UNKN_DB;
+        }
+        return NULL;
+    }
+
+error:
+    if (err != NULL) {
+        *err = DBW_ERR;
+    }
+    return NULL;
 }
 
 bstring dbw_find_snippets(

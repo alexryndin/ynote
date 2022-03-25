@@ -3,7 +3,7 @@ services:
   nginx:
     image: nginx
     volumes:
-     - ./static:/usr/share/nginx/html:ro
+     - ./static/www:/usr/share/nginx/html:ro
      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - 8080:80

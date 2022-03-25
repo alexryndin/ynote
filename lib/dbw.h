@@ -1,6 +1,7 @@
-#include <json.h>
 #include <bstrlib.h>
+#include <json.h>
 #include <rvec.h>
+#include <sqlite3.h>
 
 typedef enum DBWType {
     DBW_INTEGER,
@@ -46,12 +47,13 @@ DBWResult *dbw_query(DBWHandler *h, const bstring query, int *err);
 int dbw_close(DBWHandler *h);
 int dbw_print(DBWResult *res);
 int DBWResult_destroy(DBWResult *res);
-int dbw_new_snippet(
+sqlite_int64 dbw_new_snippet(
     DBWHandler *h,
     const bstring title,
     const bstring snippet,
     const bstring type,
-    const struct bstrList *tags);
+    const struct bstrList *tags,
+    int *err);
 
 bstring dbw_find_snippets(
     DBWHandler *h,
@@ -59,3 +61,15 @@ bstring dbw_find_snippets(
     const bstring type,
     const struct bstrList *tags,
     int *ret_err);
+
+bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, int *err);
+
+sqlite_int64 dbw_edit_snippet(
+    DBWHandler *h,
+    const sqlite_int64 id,
+    const bstring title,
+    const bstring snippet,
+    const bstring type,
+    const struct bstrList *tags,
+    char deleted,
+    int *err);
