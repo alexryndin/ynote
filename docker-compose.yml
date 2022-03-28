@@ -6,12 +6,13 @@ services:
      - ./static/www:/usr/share/nginx/html:ro
      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - 8080:80
+      - "${HOSTNAME}${PORT}:80"
   ynote:
     build: .
     depends_on:
       - nginx
     volumes:
-      - .:/build
+     - .:/build
+     - "${DBPATH}:/main.db"
     init: true
 

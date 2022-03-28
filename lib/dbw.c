@@ -7,18 +7,27 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 
-#define STR_APPEND_PATTERN(str, pattern, num)                                 \
-    bstring question_marks = bfromcstr((pattern));                            \
-    CHECK(question_marks != NULL, "Couldn't create query string");            \
-                                                                              \
-    /* As many question marks as many tags we have */                         \
-    CHECK(                                                                    \
-        bpattern(question_marks, (sizeof(pattern) - 1) * (num)-1) == BSTR_OK, \
-        "Couldnt create query string");                                       \
-    CHECK(                                                                    \
-        bconcat((str), question_marks) == BSTR_OK,                            \
-        "Couldn't create query string");                                      \
-    CHECK(bdestroy(question_marks) == BSTR_OK, "Couldn't destroy string");
+#define STR_APPEND_PATTERN(str, pattern, num)                                  \
+    do {                                                                       \
+        bstring question_marks = bfromcstr((pattern));                         \
+        if (question_marks == NULL) {                                          \
+            LOG_ERR("Couldn't create query string");                           \
+            goto error;                                                        \
+        }                                                                      \
+        /* As many question marks as many tags we have */                      \
+        if (bpattern(question_marks, (sizeof(pattern) - 1) * (num)-1) !=       \
+            BSTR_OK) {                                                         \
+            LOG_ERR("Couldnt create query string");                            \
+            bdestroy(question_marks);                                          \
+            goto error;                                                        \
+        }                                                                      \
+        if (bconcat((str), question_marks) != BSTR_OK) {                       \
+            LOG_ERR("Couldn't create query string");                           \
+            bdestroy(question_marks);                                          \
+            goto error;                                                        \
+        }                                                                      \
+        CHECK(bdestroy(question_marks) == BSTR_OK, "Couldn't destroy string"); \
+    } while (0)
 
 #define CHECK_JSON_OBJ_PUSH(json, field_name, obj)                 \
     do {                                                           \
@@ -208,6 +217,7 @@ static bstring sqlite3_find_snippets(
     const struct bstrList *tags,
     int *ret_err) {
     int err = 0;
+    const int tags_padding = 5;
     sqlite3_stmt *stmt = NULL;
     const unsigned char *tmp_text_res = NULL;
     bstring ret = NULL;
@@ -220,17 +230,43 @@ static bstring sqlite3_find_snippets(
     having_clause = bfromcstr("");
     CHECK(having_clause != NULL, "Couldn't create query string");
 
-    if (tags != NULL && tags->qty > 0) {
-        bcatcstr(where_clause, " AND " TAGS_TABLE ".name IN (");
-        STR_APPEND_PATTERN(where_clause, "?,", tags->qty);
-        CHECK(
-            bconchar(where_clause, ')') == BSTR_OK,
-            "Couldn't create query string");
+    if (tags != NULL) {
+        if (tags->qty > 0) {
+            bcatcstr(
+                where_clause,
+                "AND " SNIPPETS_TABLE
+                ".id in (SELECT s.id as tags FROM " SNIPPETS_TABLE
+                " AS s LEFT JOIN " SNIPPET_TO_TAGS_TABLE
+                " as st ON s.id = st.snippet_id "
+                "LEFT JOIN " TAGS_TABLE
+                " AS t ON t.id = st.tag_id WHERE t.name in (");
+            STR_APPEND_PATTERN(where_clause, "?,", tags->qty);
+            CHECK(
+                bcatcstr(where_clause, "))") == BSTR_OK,
+                "Couldn't create query string");
+            CHECK(
+                bcatcstr(
+                    having_clause,
+                    " HAVING COUNT(" SNIPPET_TO_TAGS_TABLE
+                    ".tag_id) >= ?") == BSTR_OK,
+                "Couldn't create query string");
+        } else {
+            CHECK(
+                bcatcstr(
+                    having_clause,
+                    " HAVING COUNT(" SNIPPET_TO_TAGS_TABLE
+                    ".tag_id) = 0") == BSTR_OK,
+                "Couldn't create query string");
+        }
+    }
+
+    if (bdata(type) != NULL) {
         CHECK(
             bcatcstr(
-                having_clause,
-                " HAVING COUNT(" SNIPPET_TO_TAGS_TABLE
-                ".tag_id) >= ?") == BSTR_OK,
+                where_clause,
+                "AND " SNIPPETS_TABLE
+                ".type in (select id from " SNIPPET_TYPES_TABLE " WHERE name = "
+                "?)") == BSTR_OK,
             "Couldn't create query string");
     }
 
@@ -248,12 +284,16 @@ static bstring sqlite3_find_snippets(
         sqlite3_errmsg(h->conn));
 
     int binding_field = 0;
-    if (tags != NULL) {
+    if (tags != NULL && tags->qty > 0) {
         for (binding_field = 0; binding_field < tags->qty; binding_field++) {
+            LOG_DEBUG(
+                "Binding filed %d(%s)",
+                binding_field + 1,
+                bdata(tags->entry[binding_field]));
             CHECK(
                 sqlite3_bind_text(
                     stmt,
-                    1 + binding_field,
+                    binding_field + 1,
                     bdata(tags->entry[binding_field]),
                     -1,
                     NULL) == SQLITE_OK,
@@ -261,10 +301,25 @@ static bstring sqlite3_find_snippets(
                 bdata(tags->entry[binding_field]),
                 sqlite3_errmsg(h->conn));
         }
+        LOG_DEBUG("Binding filed %d(%d)", binding_field + 1, tags->qty);
+    }
+    LOG_DEBUG("Binding filed %d(%s)", binding_field + 1, bdata(type));
+    if (bdata(type) != NULL) {
         CHECK(
-            sqlite3_bind_int64(stmt, binding_field + 1, tags->qty) == SQLITE_OK,
+            sqlite3_bind_text(stmt, ++binding_field, bdata(type), -1, NULL) ==
+                SQLITE_OK,
+            "Couldn't bind parameter (type %s) to statement: %s",
+            bdata(type),
+            sqlite3_errmsg(h->conn));
+    }
+    // We need to bind variables in order they appear in the query
+    // so we cannot bind tags->qty in the loop above
+    if (tags != NULL && tags->qty > 0) {
+        CHECK(
+            sqlite3_bind_int64(stmt, ++binding_field, tags->qty) == SQLITE_OK,
             "Couldn't bind parameter to statement");
     }
+
     while ((err = sqlite3_step(stmt)) != SQLITE_DONE) {
         switch (err) {
         case SQLITE_ROW:

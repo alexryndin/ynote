@@ -267,6 +267,7 @@ static void json_api_find_snippets(
     struct bstrList *taglist = NULL;
     const char *tmp_cstr = NULL;
     bstring json_str_res = NULL;
+    struct tagbstring snippet_type = {0};
 
     resp = evbuffer_new();
     CHECK_MEM(resp);
@@ -284,14 +285,24 @@ static void json_api_find_snippets(
 
     tmp_cstr = evhttp_find_header(&queries, "tags");
     if (tmp_cstr != NULL) {
-        struct tagbstring tagstr = {0};
-        btfromcstr(tagstr, tmp_cstr);
-        LOG_DEBUG("%s, %s", tmp_cstr, bdata(&tagstr));
-        taglist = bsplit(&tagstr, ',');
-        CHECK(taglist != NULL, "Couldn't split tags string");
+        if (!strcmp(tmp_cstr, "")) {
+            taglist = bstrListCreate();
+        } else {
+            struct tagbstring tagstr = {0};
+            btfromcstr(tagstr, tmp_cstr);
+            LOG_DEBUG("%s, %s", tmp_cstr, bdata(&tagstr));
+            taglist = bsplit(&tagstr, ',');
+            CHECK(taglist != NULL, "Couldn't split tags string");
+        }
     }
 
-    json_str_res = dbw_find_snippets(wctx->db_handle, NULL, NULL, taglist, &err);
+    tmp_cstr = evhttp_find_header(&queries, "type");
+    if (tmp_cstr != NULL && strcmp(tmp_cstr, "")) {
+        btfromcstr(snippet_type, tmp_cstr);
+    }
+
+    json_str_res =
+        dbw_find_snippets(wctx->db_handle, NULL, &snippet_type, taglist, &err);
 
     CHECK(
         json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,

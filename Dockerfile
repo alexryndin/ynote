@@ -12,4 +12,4 @@ COPY --from=0 /build/init_db.sql /init_db.sql
 # RUN /init_db.sh
 COPY --from=0 /build/test.db /test.db
 RUN cp /usr/share/zoneinfo/Europe/Moscow /etc/localtime
-CMD ["/bin/sh", "-c", "/main"]
+CMD ["/bin/sh", "-c", "/main /main.db"]

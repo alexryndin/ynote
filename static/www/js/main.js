@@ -41,7 +41,7 @@ function delete_snippet(id) {
 
 function ask_delete_snippet(evt) {
     const id = evt.currentTarget._snippet_id;
-    let result = window.confirm(id);
+    let result = window.confirm(`Delete snippet ${id}?`);
     console.log(result);
     if (result) {
         delete_snippet(id);
@@ -171,6 +171,8 @@ async function create_snippet() {
 
 function index() {
     let url = new URL('/api/find_snippets', window.location.origin);
+    url.search = window.location.search;
+    console.log(url.search);
     fetch(url)
         .then((response) => {
             return response.json();
@@ -250,7 +252,20 @@ async function snippet() {
     const type = document.createElement('h2');
     type.innerHTML = json["result"]["type"];
     $("#snippet")?.appendChild(type);
-    const content = document.createElement('p');
+    let content;
+    switch (json["result"]["type"]) {
+        case 'plain':
+            content = document.createElement('p');
+            break;
+        case 'bash':
+        case 'c':
+            content = document.createElement('code');
+            content.className = "container-fluid";
+            break;
+        default:
+            content = document.createElement('p');
+            break;
+    }
     content.innerText = json["result"]["content"];
     $("#snippet")?.appendChild(content);
     console.log(json);
