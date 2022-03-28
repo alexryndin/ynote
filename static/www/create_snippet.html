@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8">
+    <title>ynote</title>
+    <link rel="stylesheet" href="css/pico.css">
+    <link rel="stylesheet" href="css/styles.css">
+  </head>
+  <body>
+    <p>Hello</p>
+    <div id="snippet" class="container-fluid content">
+      <div id="message-block" class="bar warn">Initialization, wait...</div>
+      <h1 contenteditable="true" id="title">Your title</h1>
+      <label for="type-list">Type
+        <select id="type-list"></select>
+      </label>
+      <code class="container-fluid" contenteditable="true" id="content">Your code here</code>
+      <label for="type-list">Tags
+        <input class="container-fluid" id="tags"></input>
+      </label>
+      <button class="outline" id="send-button">Send</a>
+    </div>
+    <script src="js/helpers.js"></script>
+    <script src="js/main.js"></script>
+    <script>create_snippet()</script>
+  </body>
+</html>
