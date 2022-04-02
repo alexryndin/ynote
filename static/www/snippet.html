@@ -10,6 +10,12 @@
     <p>Hello</p>
     <div id="snippet" class="container-fluid content">
       <div id="message-block" class="bar warn">Initialization, wait...</div>
+      <h1 id="title"></h1>
+      <form action="/create_snippet.html">
+        <input type="submit" value="Edit snippet" />
+        <input placeholder="ID" name="id" id="snippet-id">
+        <input name="edit" hidden="" value='true'>
+      </form>
     </div>
     <script src="js/helpers.js"></script>
     <script src="js/main.js"></script>

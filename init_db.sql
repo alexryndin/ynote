@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS snippet_to_tags (
 );
 
 INSERT INTO snippet_types (name) VALUES ("bash");
+INSERT INTO snippet_types (name) VALUES ("code");
 INSERT INTO snippet_types (name) VALUES ("plain");
 INSERT INTO snippets (title, content, type) VALUES ("Hello", "world", 1);
 INSERT INTO snippets (title, content, type) VALUES ("Привет", "Мир", 1);

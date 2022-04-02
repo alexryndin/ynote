@@ -2,6 +2,7 @@
 
 const types = [
     "plain",
+    "code",
     "bash",
 ];
 
@@ -179,13 +180,15 @@ function index() {
         })
         .then((json) => {
             console.log(json);
-            const tbl = document.createElement('table');
+            document.querySelectorAll('#snippets-table > thead > tr > th').forEach(x => x.addEventListener("click", Sortable.sort))
+            const tbl = $("#snippets-table");
+            tbl.className = 'sortable';
             const tbdy = document.createElement('tbody');
             tbl.appendChild(tbdy);
             const result = json["result"];
             for (let i = 0; i < json["result"]["title"].length; i++) {
                 const tr = tbdy.insertRow();
-                for (let column of ["title", "content", "id", "created", "updated", "tags"]) {
+                for (let column of ["id", "title", "content", "type", "created", "updated", "tags"]) {
                     const td = tr.insertCell();
                     console.log(column);
                     if (column == "title") {
@@ -244,14 +247,20 @@ async function snippet() {
         throw new Error('id expected');
     }
 
+    $("#snippet-id").value = id;
+    $("#snippet-id").style.display = 'none';
+
     const json = await fetch_snippet_data(id);
 
-    const h = document.createElement('h1');
+    const h = $('#title');
     h.innerHTML = json["result"]["title"];
-    $("#snippet")?.appendChild(h);
     const type = document.createElement('h2');
     type.innerHTML = json["result"]["type"];
     $("#snippet")?.appendChild(type);
+    const tags = document.createElement('p');
+    var sep = `${tags_sep} `;
+    tags.innerHTML = `Tags: ${json["result"]["tags"].join(sep)}`;
+    $("#snippet")?.appendChild(tags);
     let content;
     switch (json["result"]["type"]) {
         case 'plain':
@@ -263,7 +272,8 @@ async function snippet() {
             content.className = "container-fluid";
             break;
         default:
-            content = document.createElement('p');
+            content = document.createElement('code');
+            content.className = "container-fluid";
             break;
     }
     content.innerText = json["result"]["content"];

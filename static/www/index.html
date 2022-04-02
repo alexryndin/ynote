@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <title>ynote</title>
     <link rel="stylesheet" href="css/pico.css">
+    <link rel="stylesheet" href="css/styles.css">
   </head>
   <body>
     <div class="container">
@@ -18,8 +19,10 @@
             Type
             <select name="type">
               <option value="bash">bash</option>
-              <option value="c">c</option>
+              <option value="plain">plain</option>
+              <option value="code">code</option>
             </select>
+
           </label>
           <button>Search</button>
         </div>
@@ -29,6 +32,21 @@
       </form>
       <div id="snippets">
         <div id="message-block" class="bar warn">Initialization, wait...</div>
+        <table id="snippets-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Title</th>
+              <th>Content</th>
+              <th>Type</th>
+              <th>Created</th>
+              <th>Updated</th>
+              <th>Tags</th>
+              <th>Edit</th>
+              <th>Delete</th>
+            </tr>
+          </thead>
+        </table>
       </div>
     </div>
     <script src="js/helpers.js"></script>
