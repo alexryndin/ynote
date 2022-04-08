@@ -1,5 +1,6 @@
 #include <bstrlib.h>
 #include <json.h>
+#include <md4c.h>
 #include <rvec.h>
 #include <sqlite3.h>
 

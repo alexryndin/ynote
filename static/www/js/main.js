@@ -4,6 +4,7 @@ const types = [
     "plain",
     "code",
     "bash",
+    "markdown",
 ];
 
 const tags_sep = ',';
@@ -49,9 +50,12 @@ function ask_delete_snippet(evt) {
     }
 }
 
-async function fetch_snippet_data(id) {
+async function fetch_snippet_data(id, edit) {
     let url = new URL('/api/get_snippet', window.location.origin);
     let params = { 'id': id };
+    if (edit) {
+        params['edit'] = true;
+    }
     url.search = new URLSearchParams(params).toString()
     return await fetch(url)
         .then((response) => {
@@ -160,7 +164,7 @@ async function create_snippet() {
     }
     if (edit) {
         console.log(id);
-        const json = await fetch_snippet_data(id);
+        const json = await fetch_snippet_data(id, edit);
         console.log(json);
         $("#title").textContent = json["result"]["title"];
         $("#content").innerText = json["result"]["content"];
@@ -250,12 +254,12 @@ async function snippet() {
     $("#snippet-id").value = id;
     $("#snippet-id").style.display = 'none';
 
-    const json = await fetch_snippet_data(id);
+    const json = await fetch_snippet_data(id, false);
 
     const h = $('#title');
     h.innerHTML = json["result"]["title"];
-    const type = document.createElement('h2');
-    type.innerHTML = json["result"]["type"];
+    const type = document.createElement('p');
+    type.innerHTML = `Type: ${json["result"]["type"]}`;
     $("#snippet")?.appendChild(type);
     const tags = document.createElement('p');
     var sep = `${tags_sep} `;
@@ -271,12 +275,21 @@ async function snippet() {
             content = document.createElement('code');
             content.className = "container-fluid";
             break;
+        case 'markdown':
+            content = document.createElement('div');
+            content.className = "container-fluid";
+            break;
         default:
             content = document.createElement('code');
             content.className = "container-fluid";
             break;
     }
-    content.innerText = json["result"]["content"];
+    if (json["result"]["type"] === 'markdown') {
+        content.innerHTML = json["result"]["content"];
+
+    } else {
+        content.innerText = json["result"]["content"];
+    }
     $("#snippet")?.appendChild(content);
     console.log(json);
 }

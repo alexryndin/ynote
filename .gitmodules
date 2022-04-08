@@ -10,3 +10,6 @@
 [submodule "contrib/json-builder"]
 	path = contrib/json-builder
 	url = https://github.com/json-parser/json-builder
+[submodule "contrib/md4c"]
+	path = contrib/md4c
+	url = https://github.com/mity/md4c.git

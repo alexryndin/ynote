@@ -7,6 +7,8 @@
 #include <event2/keyvalq_struct.h>
 #include <json-builder.h>
 #include <json.h>
+#include <md4c-html.h>
+#include <md4c.h>
 #include <signal.h>
 #include <stdlib.h>
 
@@ -67,6 +69,10 @@ static struct tagbstring __true = bsStatic("true");
 #define JSON_GET_ITEM(json, obj, index)                            \
     do {                                                           \
                                                                    \
+        if ((json) == NULL) {                                      \
+            obj = NULL;                                            \
+            break;                                                 \
+        }                                                          \
         if (json->type != json_object) {                           \
             obj = NULL;                                            \
             break;                                                 \
@@ -166,13 +172,106 @@ static void bstring_free_cb(const void *data, size_t datalen, void *extra) {
     if (str != NULL)
         bdestroy(str);
 }
+
+void bstring_append(const MD_CHAR *ptr, MD_SIZE size, void *str) {
+    CHECK(str != NULL, "Null str");
+    CHECK(bcatblk(str, ptr, size) == BSTR_OK, "Couldn't append to string");
+
+error:
+    return;
+}
+
+int render_json(bstring *json_str) {
+    int rc = 0;
+    json_value *json = NULL;
+    json_value *json_tmp = NULL;
+    json_value *json_result = NULL;
+    bstring new_json_str = NULL;
+    bstring html_str = NULL;
+
+    json_settings js = {.value_extra = json_builder_extra};
+    json_serialize_opts jso = {.mode = json_serialize_mode_packed};
+    CHECK(json_str != NULL && bdata(*json_str) != NULL, "Null json");
+
+    json = json_parse_ex(&js, bdata(*json_str), blength(*json_str), NULL);
+
+    CHECK(json != NULL, "Couldn't parse json");
+
+    JSON_GET_ITEM(json, json_result, "result");
+    CHECK(json_result != NULL, "Incorrect json");
+
+    JSON_GET_ITEM(json_result, json_tmp, "type");
+    CHECK(json_tmp != NULL && json_tmp->type == json_string, "Incorrect json");
+
+    LOG_DEBUG(
+        "type is %s, len is %d",
+        json_tmp->u.string.ptr,
+        json_tmp->u.string.length);
+
+    if (!strcmp(json_tmp->u.string.ptr, "markdown")) {
+        JSON_GET_ITEM(json_result, json_tmp, "content");
+        CHECK(
+            json_tmp != NULL && json_tmp->type == json_string,
+            "Incorrect json");
+
+        html_str = bfromcstr("");
+        CHECK(html_str != NULL, "Couldn't create string");
+
+        CHECK(
+            md_html(
+                json_tmp->u.string.ptr,
+                json_tmp->u.string.length,
+                bstring_append,
+                html_str,
+                0,
+                0) == 0,
+            "Couldn't render markdown snippet");
+
+        CHECK(bdata(html_str) != NULL, "Couldn't render markdown");
+
+        free(json_tmp->u.string.ptr);
+        json_tmp->u.string.ptr = bdata(html_str);
+        json_tmp->u.string.length = blength(html_str);
+
+        html_str->data = NULL;
+        CHECK(
+            (new_json_str = bfromcstralloc(json_measure_ex(json, jso), "")) !=
+                NULL,
+            "Coudn't create string");
+
+        json_serialize_ex(bdata(new_json_str), json, jso);
+        CHECK(bdestroy(*json_str) == BSTR_OK, "Couldn't destory old json");
+        new_json_str->slen = new_json_str->mlen - 1;
+        *json_str = new_json_str;
+        new_json_str = NULL;
+    }
+    LOG_DEBUG("%s", bdata(*json_str));
+
+exit:
+    if (json != NULL) {
+        json_value_free(json);
+    }
+    if (new_json_str != NULL) {
+        bdestroy(new_json_str);
+    }
+    if (html_str != NULL) {
+        bdestroy(html_str);
+    }
+    return rc;
+error:
+    rc = -1;
+    goto exit;
+}
+
 static void
 json_api_get_snippet(struct evhttp_request *req, const struct WNContext *wctx) {
     char *reason = "OK";
     int ret_code = 200;
     int err = 0;
     struct evbuffer *resp = NULL;
+    char edit = 0;
     const char *id_str = NULL;
+    const char *edit_str = NULL;
     sqlite_int64 id = 0;
     struct evkeyvalq queries;
     char *bad_request_msg = NULL;
@@ -202,6 +301,10 @@ json_api_get_snippet(struct evhttp_request *req, const struct WNContext *wctx) {
         bad_request_msg = "{\"status\": \"malformed id\"}";
         goto bad_request;
     }
+    edit_str = evhttp_find_header(&queries, "edit");
+    if (edit_str != NULL && biseqcstrcaseless(&__true, edit_str)) {
+        edit = 1;
+    }
     LOG_DEBUG("json_api_got_snippet got %lld", id);
     json_str_res = dbw_get_snippet(wctx->db_handle, id, &err);
     if (err == DBW_ERR_NOT_FOUND) {
@@ -211,6 +314,10 @@ json_api_get_snippet(struct evhttp_request *req, const struct WNContext *wctx) {
     CHECK(
         json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
         "Couldn't get snippets");
+
+    if (!edit) {
+        CHECK(render_json(&json_str_res) == 0, "Couldn't render json");
+    }
 
     CHECK(
         evbuffer_add_reference(
@@ -645,6 +752,7 @@ int main(int argc, char *argv[]) {
     int rc = 0;
     rc = 0;
     int err = 0;
+    int port = 8080;
     struct event_base *base = NULL;
     struct evhttp *http = NULL;
     struct evhttp_bound_socket *handle = NULL;
@@ -653,8 +761,13 @@ int main(int argc, char *argv[]) {
     struct event *intterm_event = NULL;
     DBWHandler *db = NULL;
 
-    if (argc != 2) {
+    if (argc != 2 && argc != 3) {
         goto usage;
+    }
+
+    if (argc == 3) {
+        PARSE_INT(strtol, argv[2], port, rc);
+        CHECK(rc == 0, "Couldn't parse port");
     }
 
     btfromcstr(dbpath, argv[1]);
@@ -667,8 +780,8 @@ int main(int argc, char *argv[]) {
     evhttp_set_default_content_type(http, "text/html");
 
     CHECK(
-        (handle = evhttp_bind_socket_with_handle(
-             http, "0.0.0.0", atoi("8080"))) != NULL,
+        (handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", port)) !=
+            NULL,
         "Couldn't bind to a socket");
 
     db = dbw_connect(DBW_SQLITE3, &dbpath, &err);

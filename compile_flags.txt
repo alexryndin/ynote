@@ -4,4 +4,5 @@
 -Icontrib/cJSON
 -Icontrib/json-parser
 -Icontrib/json-builder
+-Icontrib/md4c/src
 -Itests
