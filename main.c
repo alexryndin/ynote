@@ -1,4 +1,5 @@
 #include <bstrlib.h>
+#include <curl/curl.h>
 #include <dbg.h>
 #include <dbw.h>
 #include <event2/buffer.h>
@@ -86,17 +87,54 @@ static struct tagbstring __true = bsStatic("true");
         }                                                          \
     } while (0)
 
-struct WNContext {
+struct YNoteApp {
     struct event_base *base;
     void *db_handle;
+    CURLM *curl_multi;
+    bstring tg_token;
 };
+
+int http_client_init(struct YNoteApp *app) {
+    CHECK(app != NULL && app->curl_multi != NULL, "NULL app");
+    curl_multi_setopt(app->curl_multi, CURLMOPT_SOCKETFUNCTION, http_client_handle_socket);
+    curl_multi_setopt(app->curl_multi, CURLMOPT_TIMERFUNCTION, http_client_start_timeout);
+error:
+    return -1;
+}
+
+static int read_config(struct YNoteApp *app, bstring path) {
+    int rc = 0;
+    FILE *conf = NULL;
+    bstring conf_str = NULL;
+
+    CHECK(path != NULL, "Null path");
+    CHECK(app != NULL, "Null app");
+    CHECK((conf = fopen(bdata(path), "r")) != NULL, "Couldn't open config");
+
+    app->tg_token = bgets((bNgetc)fgetc, conf, '\n');
+    CHECK(app->tg_token != NULL, "Failed to read tg_token");
+    CHECK(btrimws(app->tg_token) == BSTR_OK, "Failed to trim input");
+    CHECK(blength(app->tg_token) > 0, "Empty config");
+
+exit:
+    if (conf != NULL) {
+        fclose(conf);
+    }
+    if (conf_str != NULL) {
+        bdestroy(conf_str);
+    }
+    return rc;
+error:
+    rc = -1;
+    goto exit;
+}
 
 // Sigint sigterm handler
 static void sigint_term_handler(int sig, short events, void *arg) {
-    struct WNContext *wctx = arg;
-    CHECK(wctx != NULL, "Null contenxt");
-    CHECK(wctx->base != NULL, "Null base");
-    CHECK(wctx->db_handle != NULL, "Null db_handle");
+    struct YNoteApp *app = arg;
+    CHECK(app != NULL, "Null contenxt");
+    CHECK(app->base != NULL, "Null base");
+    CHECK(app->db_handle != NULL, "Null db_handle");
 
     (void)events;
 
@@ -110,21 +148,21 @@ static void sigint_term_handler(int sig, short events, void *arg) {
     default:
         LOG_ERR("Got unexpected signal");
     }
-    event_base_loopexit(wctx->base, NULL);
+    event_base_loopexit(app->base, NULL);
     CHECK(
-        dbw_close(wctx->db_handle) == DBW_OK,
+        dbw_close(app->db_handle) == DBW_OK,
         "Couldn't close database connetcion");
 error:
     return;
 }
 
 static void
-json_api_cb(struct evhttp_request *req, const struct WNContext *wctx) {
+json_api_cb(struct evhttp_request *req, const struct YNoteApp *app) {
     char *reason = "OK";
     int rc = 200;
     struct evbuffer *resp = NULL;
 
-    (void)wctx;
+    (void)app;
 
     resp = evbuffer_new();
     CHECK_MEM(resp);
@@ -264,7 +302,7 @@ error:
 }
 
 static void
-json_api_get_snippet(struct evhttp_request *req, const struct WNContext *wctx) {
+json_api_get_snippet(struct evhttp_request *req, const struct YNoteApp *app) {
     char *reason = "OK";
     int ret_code = 200;
     int err = 0;
@@ -306,7 +344,7 @@ json_api_get_snippet(struct evhttp_request *req, const struct WNContext *wctx) {
         edit = 1;
     }
     LOG_DEBUG("json_api_got_snippet got %lld", id);
-    json_str_res = dbw_get_snippet(wctx->db_handle, id, &err);
+    json_str_res = dbw_get_snippet(app->db_handle, id, &err);
     if (err == DBW_ERR_NOT_FOUND) {
         bad_request_msg = "{\"status\": \"snippet not found\"}";
         goto bad_request;
@@ -364,8 +402,8 @@ bad_request:
     goto exit;
 }
 
-static void json_api_find_snippets(
-    struct evhttp_request *req, const struct WNContext *wctx) {
+static void
+json_api_find_snippets(struct evhttp_request *req, const struct YNoteApp *app) {
     char *reason = "OK";
     int rc = 200;
     int err = 0;
@@ -409,7 +447,7 @@ static void json_api_find_snippets(
     }
 
     json_str_res =
-        dbw_find_snippets(wctx->db_handle, NULL, &snippet_type, taglist, &err);
+        dbw_find_snippets(app->db_handle, NULL, &snippet_type, taglist, &err);
 
     CHECK(
         json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
@@ -456,7 +494,7 @@ error:
 }
 
 static void json_api_delete_snippet(
-    struct evhttp_request *req, const struct WNContext *wctx) {
+    struct evhttp_request *req, const struct YNoteApp *app) {
     char *reason = "OK";
     int rc = 200;
     int err = 0;
@@ -492,7 +530,7 @@ static void json_api_delete_snippet(
         goto bad_request;
     }
     snippet_id = dbw_edit_snippet(
-        wctx->db_handle, snippet_id, NULL, NULL, NULL, NULL, 1, &err);
+        app->db_handle, snippet_id, NULL, NULL, NULL, NULL, 1, &err);
     CHECK(
         evbuffer_add_printf(
             resp, "{\"status\": \"ok\", \"id\": %lld}", snippet_id) > 0,
@@ -514,7 +552,7 @@ exit:
     BAD_REQ_HANDLE;
 }
 static void json_api_create_snippet(
-    struct evhttp_request *req, const struct WNContext *wctx) {
+    struct evhttp_request *req, const struct YNoteApp *app) {
     int rc = 200;
     int err = 0;
     char *reason = "OK";
@@ -683,17 +721,10 @@ static void json_api_create_snippet(
 
     if (edit) {
         snippet_id = dbw_edit_snippet(
-            wctx->db_handle,
-            snippet_id,
-            &title,
-            &content,
-            &type,
-            tags,
-            0,
-            &err);
+            app->db_handle, snippet_id, &title, &content, &type, tags, 0, &err);
     } else {
         snippet_id = dbw_new_snippet(
-            wctx->db_handle, &title, &content, &type, tags, &err);
+            app->db_handle, &title, &content, &type, tags, &err);
     }
     if (err == DBW_ERR_NOT_FOUND) {
         bad_request_msg = "wrong type";
@@ -757,11 +788,12 @@ int main(int argc, char *argv[]) {
     struct evhttp *http = NULL;
     struct evhttp_bound_socket *handle = NULL;
     struct tagbstring dbpath = {0};
-    struct WNContext *wctx = NULL;
+    struct YNoteApp *app = NULL;
     struct event *intterm_event = NULL;
+    struct tagbstring conf_path = bsStatic("./ynote.conf");
     DBWHandler *db = NULL;
 
-    if (argc != 2 && argc != 3) {
+    if (argc != 2 && argc != 3 && argc != 4) {
         goto usage;
     }
 
@@ -770,12 +802,22 @@ int main(int argc, char *argv[]) {
         CHECK(rc == 0, "Couldn't parse port");
     }
 
+    if (argc == 4) {
+        btfromcstr(conf_path, argv[3]);
+    }
+
     btfromcstr(dbpath, argv[1]);
+
+    CHECK(
+        curl_global_init(CURL_GLOBAL_ALL) == CURLE_OK,
+        "Couldn't initialize curl");
 
     CHECK((base = event_base_new()) != NULL, "Couldn't initialize event base");
     CHECK((http = evhttp_new(base)) != NULL, "Couldn't initialize http handle");
 
-    CHECK_MEM(wctx = calloc(1, sizeof(struct WNContext)));
+    CHECK_MEM(app = calloc(1, sizeof(struct YNoteApp)));
+
+    CHECK(read_config(app, &conf_path) == 0, "Couldn't read config");
 
     evhttp_set_default_content_type(http, "text/html");
 
@@ -787,39 +829,44 @@ int main(int argc, char *argv[]) {
     db = dbw_connect(DBW_SQLITE3, &dbpath, &err);
     CHECK(err == 0, "Couldn't connect to database");
 
-    wctx->db_handle = db;
-    wctx->base = base;
+    app->db_handle = db;
+    app->base = base;
+    CHECK(
+        (app->curl_multi = curl_multi_init()) != NULL,
+        "Couldn't initialize curl");
+
+    http_client_init(app);
 
     evhttp_set_cb(
         http,
         "/api/create_snippet",
         (void (*)(struct evhttp_request *, void *))json_api_create_snippet,
-        wctx);
+        app);
 
     evhttp_set_cb(
         http,
         "/api/find_snippets",
         (void (*)(struct evhttp_request *, void *))json_api_find_snippets,
-        wctx);
+        app);
 
     evhttp_set_cb(
         http,
         "/api/get_snippet",
         (void (*)(struct evhttp_request *, void *))json_api_get_snippet,
-        wctx);
+        app);
 
     evhttp_set_cb(
         http,
         "/api/delete_snippet",
         (void (*)(struct evhttp_request *, void *))json_api_delete_snippet,
-        wctx);
+        app);
 
     evhttp_set_gencb(
-        http, (void (*)(struct evhttp_request *, void *))json_api_cb, wctx);
+        http, (void (*)(struct evhttp_request *, void *))json_api_cb, app);
 
     CHECK(
         (intterm_event =
-             evsignal_new(base, SIGTERM, sigint_term_handler, wctx)) != NULL,
+             evsignal_new(base, SIGTERM, sigint_term_handler, app)) != NULL,
         "Couldn't create sigterm handler");
     CHECK(
         event_add(intterm_event, NULL) == 0,
@@ -827,7 +874,7 @@ int main(int argc, char *argv[]) {
 
     CHECK(
         (intterm_event =
-             evsignal_new(base, SIGINT, sigint_term_handler, wctx)) != NULL,
+             evsignal_new(base, SIGINT, sigint_term_handler, app)) != NULL,
         "Couldn't create sigint handler");
     CHECK(
         event_add(intterm_event, NULL) == 0,
@@ -837,6 +884,7 @@ int main(int argc, char *argv[]) {
     event_base_dispatch(base);
 
 exit:
+    curl_global_cleanup();
     return rc;
 error:
     rc = 1;
