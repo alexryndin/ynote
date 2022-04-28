@@ -1,5 +1,5 @@
 CFLAGS=-g -O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DNDEBUG -isystemcontrib/chelpers/src -isystemcontrib/bstring/bstring -isystemcontrib/json-parser -isystemcontrib/json-builder -isystemcontrib/md4c/src -Ilib $(OPTFLAGS)
-LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm $(OPTLIBS)
+LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm -lcurl $(OPTLIBS)
 PREFIX?=/usr/local
 
 BIN_SRC=$(wildcard *.c)

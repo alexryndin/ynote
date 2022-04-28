@@ -2,3 +2,5 @@ lib/*.o
 *.o
 *.db
 main
+ynote.conf
+ynote.json
