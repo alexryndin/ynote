@@ -1,5 +1,17 @@
-CFLAGS=-g -O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DNDEBUG -isystemcontrib/chelpers/src -isystemcontrib/bstring/bstring -isystemcontrib/json-parser -isystemcontrib/json-builder -isystemcontrib/md4c/src -Ilib $(OPTFLAGS)
-LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm -lcurl $(OPTLIBS)
+CFLAGS=-O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DNDEBUG \
+			 -isystemcontrib/chelpers/src                                                  \
+			 -isystemcontrib/bstring/bstring                                               \
+			 -isystemcontrib/json-parser                                                   \
+			 -isystemcontrib/json-builder                                                  \
+			 -isystemcontrib/md4c/src                                                      \
+			 -Ilib                                                                         \
+			 $(OPTFLAGS)                                                                   \
+			 $(shell pkg-config lua$(LUA_VER) --cflags)
+
+LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm -lcurl \
+			 $(shell pkg-config lua$(LUA_VER) --libs)              \
+       $(OPTLIBS)
+
 PREFIX?=/usr/local
 
 BIN_SRC=$(wildcard *.c)
@@ -20,6 +32,7 @@ all: $(BIN) $(SHARED) tests
 dev: CFLAGS := $(filter-out -O2,$(CFLAGS))
 dev: CFLAGS := $(filter-out -DNDEBUG,$(CFLAGS))
 dev: CFLAGS := $(filter-out -pedantic,$(CFLAGS))
+dev: CFLAGS += -g
 dev: all
 
 $(BIN): $(LIB) $(EXTERNAL)

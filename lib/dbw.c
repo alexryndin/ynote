@@ -856,6 +856,9 @@ static DBWHandler *sqlite3_connect(const bstring filename, int *err) {
      */
 
     h->conn = db;
+    if (err != NULL) {
+        *err = DBW_OK;
+    }
     h->DBWDBType = DBW_SQLITE3;
     return h;
 error:
@@ -949,6 +952,9 @@ sqlite3_get_table_types(DBWHandler *h, const bstring table, int *err) {
     if (query != NULL) {
         bdestroy(query);
     }
+    if (err != NULL) {
+        *err = DBW_OK;
+    }
     return ret;
 error:
     if (ret != NULL) {
@@ -1009,6 +1015,9 @@ static DBWResult *sqlite3_query(DBWHandler *h, const bstring query, int *err) {
         &zErrMsg);
     CHECK(rc == 0, "SQLite: couldn't execute query: %s", zErrMsg);
 
+    if (err != NULL) {
+        *err = DBW_OK;
+    }
     return ret;
 error:
     if (ret != NULL) {

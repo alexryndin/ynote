@@ -3,15 +3,19 @@ services:
   nginx:
     image: nginx
     volumes:
-     - ./static/www:/usr/share/nginx/html:ro
+     - ./static/www:/usr/share/ynote/html:ro
      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "${HOSTNAME}${PORT}:80"
   ynote:
-    build: .
+    build:
+      context: .
+      args:
+        LUA_VER: "5.4"
     depends_on:
       - nginx
     volumes:
      - .:/build
      - "${DBPATH}:/main.db"
+     - "${CONF_PATH}:/ynote.lua"
 

@@ -8,6 +8,8 @@
 #include <event2/keyvalq_struct.h>
 #include <json-builder.h>
 #include <json.h>
+#include <lauxlib.h>
+#include <lualib.h>
 #include <md4c-html.h>
 #include <md4c.h>
 #include <signal.h>
@@ -18,7 +20,7 @@
 #define BUF_LEN 4096
 #endif
 
-#define USAGE "Usage: %s db_path\n"
+#define USAGE "Usage: %s -c|--conf config path\n"
 
 static struct tagbstring s_true = bsStatic("true");
 
@@ -109,6 +111,38 @@ static const char *const sendMessagelUrl =
     obj = ret;                                                 \
   } while (0)
 
+#define LUA_CONF_READ_STRING(dst, src)               \
+  do {                                               \
+    switch (lua_getglobal((app->lua), #src)) {       \
+    case LUA_TNIL:                                   \
+      LOG_ERR("Failed to read " #src);               \
+      goto error;                                    \
+    case LUA_TSTRING:                                \
+      (dst) = bfromcstr(lua_tostring(app->lua, -1)); \
+      CHECK((dst) != NULL, "Failed to read " #src);  \
+      CHECK(blength((dst)) > 0, "Empty config");     \
+      break;                                         \
+    default:                                         \
+      LOG_ERR(#src " must be a string");             \
+      goto error;                                    \
+    }                                                \
+  } while (0);
+
+#define LUA_CONF_READ_NUMBER(dst, src, _default) \
+  do {                                           \
+    switch (lua_getglobal((app->lua), #src)) {   \
+    case LUA_TNIL:                               \
+      (dst) = (_default);                        \
+      break;                                     \
+    case LUA_TNUMBER:                            \
+      (dst) = lua_tonumber(app->lua, -1);        \
+      break;                                     \
+    default:                                     \
+      LOG_ERR(#src " must be a number");         \
+      goto error;                                \
+    }                                            \
+  } while (0);
+
 enum TgState {
   TGS_ROOT,
   TGS_GET_BY_ID,
@@ -125,7 +159,8 @@ struct UsersInfo {
 
 struct YNoteApp {
   struct event_base *evbase;
-  uint timeout;
+  uint client_timeout;
+  int port;
   uint updates_offset;
   struct UsersInfo users_info;
   void *db_handle;
@@ -134,7 +169,35 @@ struct YNoteApp {
   struct event *http_client_timer_event;
   int http_clients_running;
   bstring dbpath;
+  bstring conf_path;
+  lua_State *lua;
 };
+
+int parse_cli_options(struct YNoteApp *app, int argc, char *argv[]) {
+  int ret = 0;
+  CHECK(app != NULL, "Null app");
+
+  for (int i = 0; i < argc; i++) {
+    if (!strcmp(argv[i], "-c") || !strcmp(argv[i], "--conf")) {
+      i++;
+      if (i >= argc) {
+        SENTINEL("Wrong usage");
+      }
+      app->conf_path = bfromcstr(argv[i]);
+      CHECK(app->conf_path != NULL, "Couldn't create string");
+    }
+  }
+  if (app->conf_path == NULL) {
+    app->conf_path = bfromcstr("./ynote.lua");
+    CHECK(app->conf_path != NULL, "Couldn't create string");
+  }
+
+exit:
+  return ret;
+error:
+  ret = -1;
+  goto exit;
+}
 
 struct User *get_user(struct UsersInfo *ui, unsigned id) {
   CHECK(ui != NULL, "Null UsersInfo");
@@ -190,7 +253,7 @@ static int tg_answer_snippet(struct YNoteApp *app, bstring str_id, int to) {
   CHECK(bdata(str_id) != NULL, "Null str_id");
 
   sqlite_int64 id = 0;
-  PARSE_INT(strtoll, bdata(str_id), id, err);
+  PARSE_INT(strtoll, bdatae(str_id, ""), id, err);
   if (err != 0) {
     static_msg = (struct tagbstring)bsStatic("Couldn't parse int");
   } else {
@@ -221,7 +284,8 @@ static int tg_answer_snippet(struct YNoteApp *app, bstring str_id, int to) {
 
   JSON_GET_ITEM(json, json_tmp, "status");
   CHECK_ERR(
-      json_tmp != NULL && json_tmp->type == json_string && !strcmp(json_tmp->u.string.ptr, "ok"),
+      json_tmp != NULL && json_tmp->type == json_string &&
+          !strcmp(json_tmp->u.string.ptr, "ok"),
       "Server Error");
 
   JSON_GET_ENSURE(json, json, "result", json_object, "Server Error");
@@ -677,11 +741,11 @@ static int http_client_add_req(
       req_info->url = bformat(
           getUpdatesUrl,
           bdata(app->tg_token),
-          app->timeout,
+          app->client_timeout,
           app->updates_offset + 1);
     } else if (req_type == TG_SEND_MSG) {
-      req_info->url =
-          bformat(sendMessagelUrl, bdata(app->tg_token), app->timeout, data);
+      req_info->url = bformat(
+          sendMessagelUrl, bdata(app->tg_token), app->client_timeout, data);
     }
     CHECK(req_info->url != NULL, "Couldn't create request url");
   }
@@ -857,7 +921,7 @@ error:
 
 static int read_config(struct YNoteApp *app, bstring path) {
   int rc = 0;
-  int timeout = 60;
+  int client_timeout = 60;
   FILE *conf = NULL;
   json_value *json_conf = NULL;
   json_value *json_tmp = NULL;
@@ -867,42 +931,28 @@ static int read_config(struct YNoteApp *app, bstring path) {
   CHECK(path != NULL, "Null path");
   CHECK(app != NULL, "Null app");
 
-  CHECK(stat(bdatae(path, ""), &filestat) == 0, "Couldn't get filestat");
+  CHECK(
+      stat(bdatae(path, ""), &filestat) == 0,
+      "Couldn't get filestat for %s",
+      bdata(path));
 
   CHECK(S_ISREG(filestat.st_mode), "Config is not a file");
   CHECK(filestat.st_size < 4 * 1024 * 1024L, "Conf file is too big");
 
-  CHECK((conf = fopen(bdata(path), "r")) != NULL, "Couldn't open config");
-
-  tmp_str = bread((bNread)fread, conf);
-  CHECK(tmp_str != NULL, "Couldn't read conf");
-
-  json_conf = json_parse(bdata(tmp_str), blength(tmp_str));
-  CHECK(json_conf != NULL, "Couldn't parse conf");
-
-  CHECK(json_conf->type == json_object, "Incorrect json");
-
-  JSON_GET_ITEM(json_conf, json_tmp, "tg_token");
-  CHECK(json_tmp != NULL && json_tmp->type == json_string, "Incorrect json");
-
-  app->tg_token = bfromcstr(json_tmp->u.string.ptr);
-  CHECK(app->tg_token != NULL, "Failed to read tg_token");
-  CHECK(blength(app->tg_token) > 0, "Empty config");
-
-  JSON_GET_ITEM(json_conf, json_tmp, "client_timeout");
-  if (json_tmp != NULL && json_tmp->type == json_integer &&
-      json_tmp->u.integer > 0) {
-    timeout = json_tmp->u.integer;
-  };
-
-  app->timeout = timeout;
-
-  JSON_GET_ITEM(json_conf, json_tmp, "dbpath");
   CHECK(
-      json_tmp != NULL && json_tmp->type == json_string,
-      "Incorrect json, dbpath expected");
-  app->dbpath = bfromcstr(json_tmp->u.string.ptr);
-  CHECK(app->dbpath != NULL, "Coudln't create string");
+      (rc = luaL_loadfile(app->lua, bdata(path))) == LUA_OK,
+      "Couldn't load config");
+  CHECK(
+      (rc = lua_pcall(app->lua, 0, 0, 0)) == LUA_OK,
+      "Couldn't evaluate config");
+
+  LUA_CONF_READ_STRING(app->tg_token, tg_token);
+  LUA_CONF_READ_STRING(app->dbpath, dbpath);
+
+  LUA_CONF_READ_NUMBER(app->client_timeout, client_timeout, 30);
+  LUA_CONF_READ_NUMBER(app->port, port, 8080);
+
+  CHECK(app->port > 0 && app->port < 65535, "Wrong port number");
 
   rc = 0;
 
@@ -918,6 +968,9 @@ exit:
   }
   if (tmp_str != NULL) {
     bdestroy(tmp_str);
+  }
+  if (app->lua != NULL) {
+    lua_settop(app->lua, 0);
   }
   return rc;
 error:
@@ -1594,15 +1647,24 @@ error:
   return;
 }
 
-struct YNoteApp *ynote_app_create(bstring conf_path) {
+struct YNoteApp *ynote_app_create(int argc, char *argv[]) {
   struct YNoteApp *ret = NULL;
   int err = 0;
 
-  CHECK(bdata(conf_path) != NULL, "Null conf_path");
-
   CHECK_MEM(ret = calloc(1, sizeof(struct YNoteApp)));
 
-  CHECK(read_config(ret, conf_path) == 0, "Couldn't read config");
+  if (parse_cli_options(ret, argc, argv) != 0) {
+    printf(USAGE, argv[0]);
+    goto error;
+  }
+
+  CHECK((ret->lua = luaL_newstate()) != NULL, "Couldn't create lua state");
+  luaL_openlibs(ret->lua);
+
+  CHECK(
+      read_config(ret, ret->conf_path) == 0,
+      "Couldn't read config %s",
+      bdata(ret->conf_path));
 
   CHECK(
       (ret->evbase = event_base_new()) != NULL,
@@ -1612,7 +1674,8 @@ struct YNoteApp *ynote_app_create(bstring conf_path) {
            evtimer_new(ret->evbase, http_client_timer_cb, ret)) != NULL,
       "Couldn't initialize timer");
   ret->db_handle = dbw_connect(DBW_SQLITE3, ret->dbpath, &err);
-  CHECK(err == 0, "Couldn't connect to database");
+  CHECK(err == DBW_OK, "Couldn't connect to database");
+  CHECK(ret->db_handle != NULL, "Couldn't connect to database");
   return ret;
 
 error:
@@ -1626,28 +1689,17 @@ int main(int argc, char *argv[]) {
   int rc = 0;
   rc = 0;
   int err = 0;
-  int port = 8080;
   struct evhttp *http = NULL;
   struct evhttp_bound_socket *handle = NULL;
   struct YNoteApp *app = NULL;
   struct event *intterm_event = NULL;
-  struct tagbstring conf_path = bsStatic("./ynote.json");
   DBWHandler *db = NULL;
 
-  if (argc != 2 && argc != 3 && argc != 4) {
+  if (argc != 3) {
     goto usage;
   }
 
-  if (argc == 3) {
-    PARSE_INT(strtol, argv[2], port, rc);
-    CHECK(rc == 0, "Couldn't parse port");
-  }
-
-  if (argc == 4) {
-    btfromcstr(conf_path, argv[3]);
-  }
-
-  app = ynote_app_create(&conf_path);
+  app = ynote_app_create(argc, argv);
   CHECK(app != NULL, "Couldn't create app");
   CHECK(
       (http = evhttp_new(app->evbase)) != NULL,
@@ -1656,7 +1708,8 @@ int main(int argc, char *argv[]) {
   evhttp_set_default_content_type(http, "text/html");
 
   CHECK(
-      (handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", port)) != NULL,
+      (handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", app->port)) !=
+          NULL,
       "Couldn't bind to a socket");
 
   CHECK(http_client_init(app) == 0, "Couldn't initialize http client");
@@ -1706,12 +1759,14 @@ int main(int argc, char *argv[]) {
       event_add(intterm_event, NULL) == 0,
       "Couldn't add sigint handler to event loop");
 
-  LOG_INFO("Server started");
+  LOG_INFO("Server started, port %d", app->port);
   event_base_dispatch(app->evbase);
   // event_base_loop(app->evbase, EVLOOP_ONCE);
 
 exit:
-  ynote_app_destroy(app);
+  if (app != NULL) {
+    ynote_app_destroy(app);
+  }
   curl_global_cleanup();
   return rc;
 error:
