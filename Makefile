@@ -8,7 +8,7 @@ CFLAGS=-O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DND
 			 $(OPTFLAGS)                                                                   \
 			 $(shell pkg-config lua$(LUA_VER) --cflags)
 
-LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm -lcurl \
+LDLIBS=-ldl -levent -pedantic -lsqlite3 -lm -lcurl -lmicrohttpd \
 			 $(shell pkg-config lua$(LUA_VER) --libs)              \
        $(OPTLIBS)
 

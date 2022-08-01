@@ -1,0 +1,22 @@
+FROM alpine
+RUN apk add git
+RUN git clone https://gitlab.alpinelinux.org/alexryndin/aports.git && cd /aports/main/nginx/
+RUN apk add alpine-sdk
+RUN adduser -D builder
+RUN addgroup builder abuild
+RUN chown -R builder:builder /aports
+USER builder
+RUN abuild-keygen -a -n
+RUN cd /aports/main/nginx/ && abuild -r
+
+FROM alpine
+COPY --from=0 /home/builder/packages/main /root/repo
+RUN apk --repository ~/repo add nginx-mod-http-upload nginx --allow-untrusted
+
+EXPOSE 80
+
+STOPSIGNAL SIGQUIT
+
+CMD ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
+
+

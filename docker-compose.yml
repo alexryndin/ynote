@@ -1,10 +1,13 @@
 version: "3.3"
 services:
   nginx:
-    image: nginx
+    build:
+      context: .
+      dockerfile: Dockerfile-nginx
     volumes:
      - ./static/www:/usr/share/ynote/html:ro
      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+     - "${UPLOADS_PATH}:/uploads/"
     ports:
       - "${HOSTNAME}${PORT}:80"
   ynote:
@@ -18,4 +21,5 @@ services:
      - .:/build
      - "${DBPATH}:/main.db"
      - "${CONF_PATH}:/ynote.lua"
+     - "${UPLOADS_PATH}:/uploads/"
 

@@ -12,6 +12,7 @@
 #include <lualib.h>
 #include <md4c-html.h>
 #include <md4c.h>
+#include <microhttpd.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -171,6 +172,7 @@ struct YNoteApp {
   bstring dbpath;
   bstring conf_path;
   lua_State *lua;
+  int tg_bot_enabled;
 };
 
 int parse_cli_options(struct YNoteApp *app, int argc, char *argv[]) {
@@ -1002,6 +1004,236 @@ error:
   return;
 }
 
+// read whole input buffer into json_str
+static bstring get_bstr_body(struct evbuffer *ev_buf, bstring buf) {
+  bstring ret = NULL;
+  int bstring_is_allocated = 0;
+  if (buf != NULL) {
+    ret = buf;
+    bstring_is_allocated = 1;
+  } else {
+    ret = bfromcstralloc(BUF_LEN, "");
+    CHECK_MEM(ret);
+  }
+  while (evbuffer_get_length(ev_buf)) {
+    int n;
+    if ((ret->mlen - blength(ret)) < 2) {
+      CHECK((ret->mlen - blength(ret)) > 0, "Wrong string");
+      CHECK(
+          ballocmin(ret, ret->mlen * 2) == BSTR_OK,
+          "Couldn't reallocate string");
+    }
+    n = evbuffer_remove(
+        ev_buf, ret->data + blength(ret), ret->mlen - blength(ret) - 1);
+    CHECK(n >= 0, "Couldn't read from input ev_buffer");
+    ret->slen += n;
+    bdata(ret)[blength(ret)] = '\0';
+  }
+
+  return ret;
+
+error:
+  if (bstring_is_allocated && ret != NULL) {
+    bdestroy(ret);
+  }
+  return NULL;
+}
+
+struct bstrListEmb {
+  int qty, mlen;
+  struct tagbstring *entry;
+};
+
+struct genBstrList {
+  bstring b;
+  struct bstrListEmb *bl;
+};
+
+static int bscb_noalloc(void *parm, int ofs, int len) {
+  struct genBstrList *g = (struct genBstrList *)parm;
+  if (g->bl->qty >= g->bl->mlen) {
+    int mlen = g->bl->mlen * 2;
+    struct tagbstring *tbl;
+    while (g->bl->qty >= mlen) {
+      if (mlen < g->bl->mlen) {
+        return BSTR_ERR;
+      }
+      mlen += mlen;
+    }
+    tbl = (struct tagbstring *)realloc(
+        g->bl->entry, sizeof(struct tagbstring) * mlen);
+    if (tbl == NULL) {
+      return BSTR_ERR;
+    }
+    for (int i = g->bl->qty; i < mlen; i++) {
+      g->bl->entry[i] = (struct tagbstring){0};
+    }
+    g->bl->entry = tbl;
+    g->bl->mlen = mlen;
+  }
+  blk2tbstr(g->bl->entry[g->bl->qty], &g->b->data[ofs], len);
+  g->bl->qty++;
+  return BSTR_OK;
+}
+
+struct bstrListEmb *bsplit_noalloc(const bstring str, unsigned char splicChar) {
+  struct genBstrList gl = {0};
+  if (!str) {
+    return NULL;
+  }
+  gl.bl = calloc(1, sizeof(struct bstrListEmb));
+  if (gl.bl == NULL) {
+    return NULL;
+  }
+  gl.bl->mlen = 4;
+  gl.bl->entry = calloc(gl.bl->mlen, sizeof(bstring));
+  if (gl.bl->entry == NULL) {
+    free(gl.bl);
+    return NULL;
+  }
+  gl.b = str;
+  if (bsplitcb(str, splicChar, 0, bscb_noalloc, &gl) != BSTR_OK) {
+    free(gl.bl->entry);
+    free(gl.bl);
+    return NULL;
+  }
+  return gl.bl;
+}
+
+void bstrListEmb_destroy(struct bstrListEmb *l) {
+  if (l != NULL) {
+    if (l->entry != NULL) {
+      free(l->entry);
+      return;
+    }
+    free(l);
+  }
+  return;
+}
+
+struct genBstrList *genBstrList_create() {
+  struct genBstrList *ret = calloc(1, sizeof(struct genBstrList));
+  if (ret == NULL) {
+    return NULL;
+  }
+  ret->bl->mlen = 4;
+  ret->bl->entry = malloc(ret->bl->mlen * sizeof(bstring));
+  if (ret->bl->entry == NULL) {
+    free(ret);
+    return NULL;
+  }
+  return ret;
+}
+
+static void
+api_upload_file(struct evhttp_request *req, const struct YNoteApp *app) {
+  char *reason = "OK";
+  int rc = 200;
+  struct evbuffer *resp = NULL;
+  bstring body = NULL;
+  struct evbuffer *ibuf = NULL;
+  struct evkeyvalq queries = {0};
+
+  struct tagbstring header_tbstr = {0};
+  struct tagbstring tmp_tbstr = {0};
+  bstring boundary = NULL;
+
+  struct bstrListEmb *split_headers = NULL;
+  struct bstrListEmb *split_line = NULL;
+  struct bstrListEmb *split_subline = NULL;
+
+  const char *header_str = NULL;
+
+  (void)app;
+
+  ibuf = evhttp_request_get_input_buffer(req);
+  body = get_bstr_body(ibuf, NULL);
+  header_str =
+      evhttp_find_header(evhttp_request_get_input_headers(req), "content-type");
+  LOG_DEBUG("Got content-type %s", header_str);
+  CHECK(header_str != NULL, "Content-type is missing");
+
+  cstr2tbstr(header_tbstr, header_str);
+  struct tagbstring query = bsStatic("multipart/form-data; boundary=");
+
+  CHECK(
+      bstrncmp(&header_tbstr, &query, blength(&query)) == 0,
+      "mutipart/form-data is expected");
+
+  CHECK(
+      (split_line = bsplit_noalloc(&header_tbstr, ' ')) != NULL,
+      "Couldn't split line");
+
+  CHECK(split_line->qty >= 2, "wrong line format");
+
+  CHECK(
+      (split_subline = bsplit_noalloc(&split_line->entry[1], '=')) != NULL,
+      "Couldn't split line");
+
+  CHECK(split_subline->qty >= 2, "wrong line format");
+
+  boundary = bstrcpy(&split_subline->entry[1]);
+  CHECK(boundary != NULL, "Couldn't create string");
+
+  bstrListEmb_destroy(split_subline);
+  split_subline = NULL;
+  bstrListEmb_destroy(split_line);
+  split_line = NULL;
+
+  LOG_INFO("boundary = %s", bdata(boundary));
+
+  bassignmidstr(
+      &header_tbstr, &header_tbstr, blength(&query), blength(&header_tbstr));
+
+  LOG_DEBUG("Got body %s", bdata(body));
+  LOG_DEBUG("Got body decoded %s", evhttp_decode_uri(bdata(body)));
+  LOG_INFO("File uploaded");
+
+  resp = evbuffer_new();
+  CHECK_MEM(resp);
+  evhttp_add_header(
+      evhttp_request_get_output_headers(req),
+      "Content-Type",
+      "application/json");
+
+  CHECK(
+      evbuffer_add_printf(resp, "{\"status\": \"ok\"}"),
+      "Couldn't append to response buffer");
+
+exit:
+  if (resp != NULL) {
+    evhttp_send_reply(req, rc, reason, resp);
+  } else {
+    evhttp_send_reply(req, rc, reason, NULL);
+  }
+  evbuffer_free(resp);
+  if (body != NULL) {
+    bdestroy(body);
+  }
+  if (boundary != NULL) {
+    bdestroy(boundary);
+  }
+  if (split_subline != NULL) {
+    bstrListEmb_destroy(split_subline);
+  }
+  if (split_line != NULL) {
+    bstrListEmb_destroy(split_line);
+  }
+  return;
+
+error:
+  rc = 500;
+  reason = "Internal Server Error";
+  if (resp != NULL) {
+    evbuffer_drain(resp, evbuffer_get_length(resp));
+    if (evbuffer_add_printf(resp, "500") <= 0) {
+      evbuffer_free(resp);
+      resp = NULL;
+    };
+  }
+  goto exit;
+}
+
 static void
 json_api_cb(struct evhttp_request *req, const struct YNoteApp *app) {
   char *reason = "OK";
@@ -1016,6 +1248,10 @@ json_api_cb(struct evhttp_request *req, const struct YNoteApp *app) {
       evhttp_request_get_output_headers(req),
       "Content-Type",
       "application/json");
+
+  LOG_DEBUG(
+      "Got request for path %s",
+      evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req)));
 
   CHECK(
       evbuffer_add_printf(resp, "{\"status\": \"ok\"}"),
@@ -1394,6 +1630,7 @@ exit:
   INTERNAL_ERROR_HANDLE;
   BAD_REQ_HANDLE;
 }
+
 static void json_api_create_snippet(
     struct evhttp_request *req, const struct YNoteApp *app) {
   int rc = 200;
@@ -1460,6 +1697,8 @@ static void json_api_create_snippet(
 
   ibuf = evhttp_request_get_input_buffer(req);
   // read whole input buffer into json_str
+  json_str = get_bstr_body(ibuf, json_str);
+  CHECK(json_str != NULL, "Couldn't read body");
   while (evbuffer_get_length(ibuf)) {
     int n;
     if ((json_str->mlen - blength(json_str)) < 2) {
@@ -1685,6 +1924,125 @@ error:
   return NULL;
 }
 
+struct connection_info_struct {
+  int connectiontype;
+  char *answerstring;
+  struct MHD_PostProcessor *postprocessor;
+};
+
+static int iterate_post(
+    void *coninfo_cls,
+    enum MHD_ValueKind kind,
+    const char *key,
+    const char *filename,
+    const char *content_type,
+    const char *transfer_encoding,
+    const char *data,
+    uint64_t off,
+    size_t size) {
+  struct connection_info_struct *con_info = coninfo_cls;
+
+  LOG_DEBUG("name %s", key);
+  LOG_DEBUG("data %s", data);
+  LOG_DEBUG("filename %s",filename );
+
+  return MHD_YES;
+}
+
+static void request_completed(
+    void *cls,
+    struct MHD_Connection *connection,
+    void **con_cls,
+    enum MHD_RequestTerminationCode toe) {
+  struct connection_info_struct *con_info = *con_cls;
+
+  if (NULL == con_info)
+    return;
+
+  if (con_info->connectiontype == 1) {
+    MHD_destroy_post_processor(con_info->postprocessor);
+    if (con_info->answerstring)
+      free(con_info->answerstring);
+  }
+
+  free(con_info);
+  *con_cls = NULL;
+}
+
+static int
+send_page (struct MHD_Connection *connection, const char *page)
+{
+  int ret;
+  struct MHD_Response *response;
+
+
+  response =
+    MHD_create_response_from_buffer (strlen (page), (void *) page,
+				     MHD_RESPMEM_PERSISTENT);
+  if (!response)
+    return MHD_NO;
+
+  ret = MHD_queue_response (connection, MHD_HTTP_OK, response);
+  MHD_destroy_response (response);
+
+  return ret;
+}
+
+static int answer_to_connection(
+    void *cls,
+    struct MHD_Connection *connection,
+    const char *url,
+    const char *method,
+    const char *version,
+    const char *upload_data,
+    size_t *upload_data_size,
+    void **con_cls) {
+  if (NULL == *con_cls) {
+    struct connection_info_struct *con_info;
+
+    con_info = malloc(sizeof(struct connection_info_struct));
+    if (NULL == con_info)
+      return MHD_NO;
+    con_info->answerstring = NULL;
+
+    if (0 == strcmp(method, "POST")) {
+      con_info->postprocessor = MHD_create_post_processor(
+          connection, 8192, iterate_post, (void *)con_info);
+
+      if (NULL == con_info->postprocessor) {
+        free(con_info);
+        return MHD_NO;
+      }
+
+      con_info->connectiontype = 1;
+    } else
+      con_info->connectiontype = 0;
+
+    *con_cls = (void *)con_info;
+
+    return MHD_YES;
+  }
+
+  if (0 == strcmp(method, "GET")) {
+    return send_page(connection, "hi");
+  }
+
+  LOG_DEBUG("method is %s", method);
+  if (0 == strcmp(method, "POST")) {
+    struct connection_info_struct *con_info = *con_cls;
+
+    if (*upload_data_size != 0) {
+      MHD_post_process(con_info->postprocessor, upload_data, *upload_data_size);
+      *upload_data_size = 0;
+
+      return MHD_YES;
+    } else if (NULL != con_info->answerstring)
+      return send_page(connection, con_info->answerstring);
+  }
+
+  return send_page(connection, "err");
+}
+
 int main(int argc, char *argv[]) {
   int rc = 0;
   rc = 0;
@@ -1712,9 +2070,11 @@ int main(int argc, char *argv[]) {
           NULL,
       "Couldn't bind to a socket");
 
-  CHECK(http_client_init(app) == 0, "Couldn't initialize http client");
+  if (app->tg_bot_enabled) {
+    CHECK(http_client_init(app) == 0, "Couldn't initialize http client");
 
-  http_client_get_updates_req(app);
+    http_client_get_updates_req(app);
+  }
 
   evhttp_set_cb(
       http,
@@ -1740,6 +2100,12 @@ int main(int argc, char *argv[]) {
       (void (*)(struct evhttp_request *, void *))json_api_delete_snippet,
       app);
 
+  evhttp_set_cb(
+      http,
+      "/api/upload",
+      (void (*)(struct evhttp_request *, void *))api_upload_file,
+      app);
+
   evhttp_set_gencb(
       http, (void (*)(struct evhttp_request *, void *))json_api_cb, app);
 
@@ -1760,8 +2126,22 @@ int main(int argc, char *argv[]) {
       "Couldn't add sigint handler to event loop");
 
   LOG_INFO("Server started, port %d", app->port);
+  struct MHD_Daemon *daemon;
+
+  daemon = MHD_start_daemon(
+      MHD_USE_SELECT_INTERNALLY,
+      8083,
+      NULL,
+      NULL,
+      &answer_to_connection,
+      NULL,
+      MHD_OPTION_NOTIFY_COMPLETED,
+      request_completed,
+      NULL,
+      MHD_OPTION_END);
   event_base_dispatch(app->evbase);
   // event_base_loop(app->evbase, EVLOOP_ONCE);
+  //
 
 exit:
   if (app != NULL) {
