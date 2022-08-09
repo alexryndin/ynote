@@ -1,4 +1,5 @@
 #include <bstrlib.h>
+#include <bbstrlib.h>
 #include <json.h>
 #include <md4c.h>
 #include <rvec.h>
@@ -53,14 +54,14 @@ sqlite_int64 dbw_new_snippet(
     const bstring title,
     const bstring snippet,
     const bstring type,
-    const struct bstrList *tags,
+    const bstrListEmb *tags,
     int *err);
 
 bstring dbw_find_snippets(
     DBWHandler *h,
     const bstring title,
     const bstring type,
-    const struct bstrList *tags,
+    const bstrListEmb *tags,
     int *ret_err);
 
 bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, int *err);
@@ -71,6 +72,14 @@ sqlite_int64 dbw_edit_snippet(
     const bstring title,
     const bstring snippet,
     const bstring type,
-    const struct bstrList *tags,
+    const bstrListEmb *tags,
     char deleted,
+    int *err);
+
+sqlite_int64 dbw_register_file(
+    DBWHandler *h,
+    const bstring filename,
+    const bstring location,
+    const bstring type,
+    const bstrListEmb *tags,
     int *err);

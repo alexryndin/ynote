@@ -2,13 +2,13 @@ FROM alpine
 ARG LUA_VER="5.4"
 RUN apk add gcc make musl-dev
 RUN echo  lua${LUA_VER}-dev && sleep 5
-RUN apk add sqlite-dev libevent-dev libcurl curl-dev lua${LUA_VER}-dev
+RUN apk add sqlite-dev libevent-dev libcurl curl-dev lua${LUA_VER}-dev libmicrohttpd libmicrohttpd-dev
 ADD . /build
 RUN cd /build && make clean && make dev
 
 FROM alpine
 ARG LUA_VER="5.4"
-RUN apk add libevent sqlite-dev sqlite tzdata libcurl lua${LUA_VER}
+RUN apk add libevent sqlite-dev sqlite tzdata libcurl lua${LUA_VER} libmicrohttpd
 COPY --from=0 /build/main /main
 # RUN /init_db.sh
 COPY --from=0 /build/test.db /test.db

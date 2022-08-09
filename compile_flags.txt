@@ -1,5 +1,7 @@
 -Ilib
 -Icontrib/bstring/bstring
+-Icontrib/bstring
+-Icontrib/bstring/bstring/bstrlib.h
 -Icontrib/chelpers/src
 -Icontrib/cJSON
 -Icontrib/json-parser

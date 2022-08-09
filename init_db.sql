@@ -30,6 +30,23 @@ CREATE TABLE IF NOT EXISTS snippet_to_tags (
   UNIQUE(snippet_id, tag_id)
 );
 
+CREATE TABLE IF NOT EXISTS files (
+  id INTEGER NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  location TEXT UNIQUE NOT NULL,
+  created DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS files_to_tags (
+  id INTEGER NOT NULL PRIMARY KEY,
+  file_id NOT NULL,
+  tag_id NOT NULL,
+  FOREIGN KEY(file_id) REFERENCES files(id),
+  FOREIGN KEY(tag_id) REFERENCES tags(id)
+  UNIQUE(file_id, tag_id)
+);
+
 INSERT INTO snippet_types (name) VALUES ("bash");
 INSERT INTO snippet_types (name) VALUES ("code");
 INSERT INTO snippet_types (name) VALUES ("plain");

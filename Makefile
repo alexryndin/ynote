@@ -1,9 +1,11 @@
-CFLAGS=-O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -pedantic -DNDEBUG \
+CFLAGS=-O2 -Wall -Wextra -Wstrict-prototypes -Wmissing-prototypes -Wimplicit-function-declaration -pedantic -DNDEBUG \
 			 -isystemcontrib/chelpers/src                                                  \
 			 -isystemcontrib/bstring/bstring                                               \
+			 -isystemcontrib/bstring/bstring/bstrlib.h                                     \
 			 -isystemcontrib/json-parser                                                   \
 			 -isystemcontrib/json-builder                                                  \
 			 -isystemcontrib/md4c/src                                                      \
+			 -Icontrib/bstring/bstring                                               \
 			 -Ilib                                                                         \
 			 $(OPTFLAGS)                                                                   \
 			 $(shell pkg-config lua$(LUA_VER) --cflags)
