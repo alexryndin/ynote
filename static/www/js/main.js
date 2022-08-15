@@ -57,16 +57,16 @@ async function fetch_snippet_data(id, edit) {
         params['edit'] = true;
     }
     url.search = new URLSearchParams(params).toString()
-    return await fetch(url)
-        .then((response) => {
-            if (response.status != 200) {
-                throw new Error('403 is unacceptable for me!');
-            }
-            return response.json();
-        })
+    let response = await fetch(url);
+    if (!response.ok) {
+        let json = await response.json();
+        msg_err(`Got ${response.statusText}: ${json.msg ? json.msg : ""}`);
+        throw new Error(`${response.status} is unacceptable for me!`);
+    }
+    return response.json();
 }
 
-function create_snippet_send(title, content, type, tags, edit, id) {
+async function create_snippet_send(title, content, type, tags, edit, id) {
     if (!(
         typeof title === 'string' &&
         typeof content === 'string' &&
@@ -103,26 +103,28 @@ function create_snippet_send(title, content, type, tags, edit, id) {
     }
     msg_info("Sending request...");
     console.log(JSON.stringify(data));
-    fetch(url, {
+    let response = await fetch(url, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
+    });
+    if (!response.ok) {
+        let json = await response.json();
+        msg_err(`Got ${response.statusText}: ${json.msg ? json.msg : ""}`);
+        throw new Error(`${response.status} is unacceptable for me!`);
+    }
+    response.json().then((json) => {
+        if (json["status"] === "error") {
+            msg_err(json["msg"]);
+            return;
+        }
+        console.log("Request complete! response:", json);
+        const snippet_url = new URL('/snippet.html', window.location.origin);
+        const params = { id: json["id"] };
+        console.log(json["id"]);
+        snippet_url.search = new URLSearchParams(params).toString()
+        window.location.replace(snippet_url.toString());
     })
-        .then(response => {
-            return response.json();
-        })
-        .then((json) => {
-            if (json["status"] === "error") {
-                msg_err(json["msg"]);
-                return;
-            }
-            console.log("Request complete! response:", json);
-            const snippet_url = new URL('/snippet.html', window.location.origin);
-            const params = { id: json["id"] };
-            console.log(json["id"]);
-            snippet_url.search = new URLSearchParams(params).toString()
-            window.location.replace(snippet_url.toString());
-        })
         .catch((err) => {
             msg_err(err);
         })
@@ -290,7 +292,9 @@ async function snippet() {
     } else {
         content.innerText = json["result"]["content"];
     }
-    $("#snippet")?.appendChild(content);
+    let pre = document.createElement('pre');
+    pre.appendChild(content);
+    $("#snippet")?.appendChild(pre);
     console.log(json);
 }
 
