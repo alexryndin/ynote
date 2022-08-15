@@ -35,16 +35,16 @@ static struct tagbstring s_true = bsStatic("true");
 static const struct tagbstring status_ok = bsStatic("{\"status\": \"ok\"}");
 
 static const struct tagbstring status_method_not_allowed =
-    bsStatic("{\"status\": \"method not allowed\"}");
+    bsStatic("{\"status\": \"error\", \"msg\": \"method not allowed\"}");
 
 static const struct tagbstring status_server_error =
-    bsStatic("{\"status\": \"server error\"}");
+    bsStatic("{\"status\": \"error\", \"msg\": \"server error\"}");
 
 static const struct tagbstring status_id_required =
-    bsStatic("{\"status\": \"id required\"}");
+    bsStatic("{\"status\": \"error\", \"msg\": \"id required\"}");
 
 static const struct tagbstring status_snippet_not_found =
-    bsStatic("{\"status\": \"snippet not found\"}");
+    bsStatic("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
 
 static const char *const getUpdatesUrl =
     "https://api.telegram.org/bot%s/getUpdates?timeout=%d&offset=%d";
@@ -99,7 +99,8 @@ static const char *const sendMessagelUrl =
   bad_request_msg = bad_request_msg == NULL ? "Bad request" : bad_request_msg; \
   CHECK(                                                                       \
       evbuffer_add_printf(                                                     \
-          resp, "{\"status\": \"error\", \"msg\": \"%s\"}", bad_request_msg),  \
+          resp, "{\"status\": \"error\", \"msg\": \"%s\"}", bad_request_msg) > \
+          0,                                                                   \
       "Couldn't append to response buffer");                                   \
   goto exit
 
@@ -210,6 +211,7 @@ struct YNoteApp {
   struct event_base *evbase;
   uint client_timeout;
   int port;
+  int mhd_port;
   uint updates_offset;
   struct UsersInfo users_info;
   void *db_handle;
@@ -1015,6 +1017,7 @@ static int read_config(struct YNoteApp *app, bstring path) {
 
   LUA_CONF_READ_NUMBER(app->client_timeout, client_timeout, 30);
   LUA_CONF_READ_NUMBER(app->port, port, 8080);
+  LUA_CONF_READ_NUMBER(app->mhd_port, mhd_port, 8083);
 
   CHECK(app->port > 0 && app->port < 65535, "Wrong port number");
 
@@ -1382,6 +1385,9 @@ json_api_get_snippet(const struct YNoteApp *app, sqlite_int64 id, int render) {
 
   json_str_res = dbw_get_snippet(app->db_handle, id, &err);
   if (err == DBW_ERR_NOT_FOUND) {
+    bdestroy(json_str_res);
+    json_str_res =
+        bfromcstr("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
     goto exit;
   }
   CHECK(
@@ -1749,12 +1755,12 @@ static bstring json_api_create_snippet(
         dbw_new_snippet(app->db_handle, &title, &content, &type, &tags, &err);
   }
   if (err == DBW_ERR_NOT_FOUND) {
-    ret = bfromcstr("{\"status\": \"wrong type\"");
+    ret = bfromcstr("{\"status\": \"error\", \"msg\": \"wrong type\"");
     goto error_403;
   } else if (err == DBW_ERR_ALREADY_EXISTS) {
-    ret = bfromcstr(
-        "{\"status\": \"already exists error. possibly snippet with this "
-        "title alredy exists\"}");
+    ret = bfromcstr("{\"status\": \"error\", \"msg\": \"already exists error. "
+                    "possibly snippet with this "
+                    "title alredy exists\"}");
     goto error_403;
 
   } else if (err != DBW_OK) {
@@ -2487,7 +2493,7 @@ static enum MHD_Result mhd_api_create_snippet(
       }
     }
     json_str_res =
-        json_api_create_snippet(ci->app, body, edit, snippet_id, &rc);
+        json_api_create_snippet(ci->app, body, snippet_id, edit, &rc);
     if (json_str_res == NULL) {
       MHD_RESPONSE_WITH_TAGBSTRING(
           connection, rc, response, status_server_error, ret);
@@ -2607,6 +2613,20 @@ exit:
 error:
   ret = MHD_NO;
   goto exit;
+}
+
+void mhd_log(void *cls, const char *fm, va_list ap) {
+  int ret;
+  bstring b;
+  bvalformata(ret, b = bfromcstr(""), fm, ap);
+  if (BSTR_OK == ret) {
+    if (bdata(b) != NULL && blength(b) > 0) {
+      // remove extra newline
+      bdata(b)[blength(b) - 1] = '\0';
+    }
+    LOG_ERR("%s", bdata(b));
+  }
+  bdestroy(b);
 }
 
 static int mhd_handler(
@@ -2794,20 +2814,26 @@ int main(int argc, char *argv[]) {
       event_add(intterm_event, NULL) == 0,
       "Couldn't add sigint handler to event loop");
 
-  LOG_INFO("Server started, port %d", app->port);
   struct MHD_Daemon *daemon;
+  LOG_INFO("mhd port %d", app->mhd_port);
 
   daemon = MHD_start_daemon(
-      MHD_USE_SELECT_INTERNALLY,
-      8083,
+      MHD_USE_EPOLL_INTERNAL_THREAD | MHD_USE_ERROR_LOG,
+      app->mhd_port,
       NULL,
       NULL,
       (MHD_AccessHandlerCallback)mhd_handler,
       app,
+      MHD_OPTION_EXTERNAL_LOGGER,
+      (MHD_LogCallback)mhd_log,
+      NULL,
       MHD_OPTION_NOTIFY_COMPLETED,
-      request_completed,
+      (MHD_RequestCompletedCallback)request_completed,
       NULL,
       MHD_OPTION_END);
+
+  LOG_INFO("Server started, port %d, mhd_port %d", app->port, app->mhd_port);
+
   event_base_dispatch(app->evbase);
   // event_base_loop(app->evbase, EVLOOP_ONCE);
   //
