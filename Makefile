@@ -29,13 +29,25 @@ EXTERNAL_SRC=$(wildcard contrib/**/bstring/bstrlib.c contrib/**/src/*.c contrib/
 EXTERNAL_SRC_NO_TESTS=$(filter-out %test.c, $(EXTERNAL_SRC))
 EXTERNAL=$(patsubst %.c,%.o,$(EXTERNAL_SRC_NO_TESTS))
 
-all: $(BIN) $(SHARED) tests
+all: $(BIN) $(SHARED) tests bindgen
+
+bindgen:
+	BINDGEN_EXTRA_CLANG_ARGS="-Icontrib/chelpers/src -Icontrib/bstring/bstring -Icontrib/json-parser" bindgen lib/dbw.h
 
 dev: CFLAGS := $(filter-out -O2,$(CFLAGS))
 dev: CFLAGS := $(filter-out -DNDEBUG,$(CFLAGS))
 dev: CFLAGS := $(filter-out -pedantic,$(CFLAGS))
 dev: CFLAGS += -g
 dev: all
+
+OUT_DIR ?= .
+TARGET_LIB=$(OUT_DIR)/libdbw.a
+
+$(TARGET_LIB): $(LIB) $(EXTERNAL) build.rs
+	ar rcs $(TARGET_LIB) $(LIB) $(EXTERNAL)
+	ranlib $(TARGET_LIB)
+
+lib: $(TARGET_LIB)
 
 $(BIN): $(LIB) $(EXTERNAL)
 

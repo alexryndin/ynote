@@ -8,3 +8,8 @@ ynote.lua
 ynote_test.lua
 ynote_prod.lua
 test.lua
+
+
+# Added by cargo
+
+/target

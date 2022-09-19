@@ -43,7 +43,7 @@ typedef struct DBWHandler {
     void *conn;
 } DBWHandler;
 
-DBWHandler *dbw_connect(int DBWDBType, const bstring url, int *err);
+DBWHandler *dbw_connect(DBWDBType DBWDBType, const bstring url, int *err);
 DBWResult *dbw_get_table_types(DBWHandler *h, const bstring table, int *err);
 DBWResult *dbw_query(DBWHandler *h, const bstring query, int *err);
 int dbw_close(DBWHandler *h);

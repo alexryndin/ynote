@@ -970,7 +970,7 @@ static DBWHandler *sqlite3_connect(const bstring filename, int *err) {
   CHECK_MEM(h);
   CHECK(filename != NULL && bdata(filename) != NULL, "Null filename");
 
-  rc = sqlite3_open(bdata(filename), &db);
+  rc = sqlite3_open_v2(bdata(filename), &db, SQLITE_OPEN_READWRITE, NULL);
   CHECK(rc == 0, "Couldn't open sqlite database: %s", sqlite3_errmsg(db));
 
   rc = sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FKEY, 1, &is_fkey_enabled);
@@ -1238,7 +1238,7 @@ error:
   return NULL;
 }
 
-DBWHandler *dbw_connect(int DBWDBType, const bstring url, int *err) {
+DBWHandler *dbw_connect(DBWDBType DBWDBType, const bstring url, int *err) {
   if (DBWDBType == DBW_SQLITE3)
     return sqlite3_connect(url, err);
   if (err != NULL) {
