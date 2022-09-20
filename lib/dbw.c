@@ -1284,7 +1284,10 @@ sqlite_int64 dbw_new_snippet(
   CHECK(snippet != NULL && bdata(snippet) != NULL, "Null snippet");
   CHECK(type != NULL && bdata(type) != NULL, "Null type");
   CHECK(tags != NULL, "Null tags");
-  CHECK(rv_len(*tags) >= 0 && rv_len(*tags) < 100, "Too many tags: %zu", rv_len(*tags));
+  CHECK(
+      rv_len(*tags) >= 0 && rv_len(*tags) < 100,
+      "Too many tags: %zu",
+      rv_len(*tags));
 
   for (int i = 0; i < rv_len(*tags); i++) {
     LOG_DEBUG("Got tag %s", bdata(rv_get(*tags, i, NULL)));
