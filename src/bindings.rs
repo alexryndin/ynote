@@ -12293,11 +12293,7 @@ extern "C" {
     ) -> bstring;
 }
 extern "C" {
-    pub fn dbw_get_snippet(
-        h: *mut DBWHandler,
-        id: sqlite_int64,
-        err: *mut ::std::os::raw::c_int,
-    ) -> bstring;
+    pub fn dbw_get_snippet(h: *mut DBWHandler, id: sqlite_int64, err: *mut DBWError) -> bstring;
 }
 extern "C" {
     pub fn dbw_edit_snippet(

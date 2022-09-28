@@ -64,7 +64,7 @@ bstring dbw_find_snippets(
     const bstrListEmb *tags,
     int *ret_err);
 
-bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, int *err);
+bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, enum DBWError *err);
 
 sqlite_int64 dbw_edit_snippet(
     DBWHandler *h,

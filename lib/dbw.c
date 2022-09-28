@@ -150,7 +150,7 @@ static DBWResult *DBWResult_create(int t);
 // ******************************
 //
 static bstring
-sqlite3_get_snippet(DBWHandler *h, sqlite_int64 id, int *ret_err) {
+sqlite3_get_snippet(DBWHandler *h, sqlite_int64 id, enum DBWError *ret_err) {
   int err = 0;
   sqlite3_stmt *stmt = NULL;
   const unsigned char *tmp_text_res = NULL;
@@ -1350,7 +1350,7 @@ error:
   return -1;
 }
 
-bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, int *err) {
+bstring dbw_get_snippet(DBWHandler *h, sqlite_int64 id, enum DBWError *err) {
 
   if (h->DBWDBType == DBW_SQLITE3)
     return sqlite3_get_snippet(h, id, err);
