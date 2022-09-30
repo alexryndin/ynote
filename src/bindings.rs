@@ -12317,6 +12317,15 @@ extern "C" {
         err: *mut ::std::os::raw::c_int,
     ) -> sqlite_int64;
 }
+extern "C" {
+    pub fn json_api_create_snippet(
+        db_handle: *mut DBWHandler,
+        json_req: bstring,
+        snippet_id: sqlite_int64,
+        edit: ::std::os::raw::c_int,
+        ec: *mut ::std::os::raw::c_int,
+    ) -> bstring;
+}
 pub type __builtin_va_list = [__va_list_tag; 1usize];
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

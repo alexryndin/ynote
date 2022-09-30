@@ -5,6 +5,28 @@
 #include <rvec.h>
 #include <sqlite3.h>
 
+#define JSON_GET_ITEM(json, obj, index)                        \
+  do {                                                         \
+                                                               \
+    json_value *ret = NULL;                                    \
+    if ((json) == NULL) {                                      \
+      obj = NULL;                                              \
+      break;                                                   \
+    }                                                          \
+    if (json->type != json_object) {                           \
+      obj = NULL;                                              \
+      break;                                                   \
+    }                                                          \
+                                                               \
+    for (unsigned int i = 0; i < json->u.object.length; ++i) { \
+      if (!strcmp(json->u.object.values[i].name, index)) {     \
+        ret = (json->u).object.values[i].value;                \
+        break;                                                 \
+      }                                                        \
+    }                                                          \
+    obj = ret;                                                 \
+  } while (0)
+
 typedef enum DBWType {
     DBW_INTEGER,
     DBW_UNKN,
@@ -83,3 +105,10 @@ sqlite_int64 dbw_register_file(
     const bstring type,
     const bstrListEmb *tags,
     int *err);
+
+bstring json_api_create_snippet(
+    struct DBWHandler *db_handle,
+    bstring json_req,
+    sqlite_int64 snippet_id,
+    int edit,
+    int *ec);

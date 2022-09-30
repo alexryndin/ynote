@@ -1,13 +1,16 @@
 use dbw::{
-    bdestroy, bfromcstr, bstring, dbw_connect, dbw_get_snippet, DBWDBType, DBWDBType_DBW_SQLITE3,
-    DBWError, DBWError_DBW_ERR_NOT_FOUND, DBWError_DBW_OK, DBWHandler,
+    bdestroy, bfromcstr, blk2bstr, bstring, dbw_connect, dbw_get_snippet, json_api_create_snippet,
+    DBWDBType, DBWDBType_DBW_SQLITE3, DBWError, DBWError_DBW_ERR_NOT_FOUND, DBWError_DBW_OK,
+    DBWHandler, DBWError_DBW_ERR_ALREADY_EXISTS
 };
 use hyper::http::{Request, Response, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Server};
+use serde::{Deserialize, Serialize};
 use serde_json::{Error, Value};
 use std::convert::Infallible;
 use std::error;
+use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::fmt;
@@ -15,6 +18,7 @@ use std::net::SocketAddr;
 use std::ptr::{null, null_mut};
 use std::str;
 use std::sync::{Arc, Mutex};
+
 use url;
 
 struct YNote {
@@ -31,6 +35,14 @@ impl Drop for Bstring {
             bdestroy(self.0);
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CreateSnippet {
+    title: String,
+    content: String,
+    r#type: String,
+    tags: Vec<String>,
 }
 
 struct SendPtr<T>(T);
@@ -67,6 +79,35 @@ impl error::Error for YNoteError {
 }
 
 impl error::Error for YNoteErrorKind {}
+
+
+async fn create_snippet_handler(
+    req: Request<Body>,
+    app: Arc<YNote>,
+) -> Result<Response<Body>, hyper::Error> {
+    let mut response = Response::new(Body::empty());
+    let mut params = url::form_urlencoded::parse(&req.uri().query().unwrap_or_default().as_bytes());
+    let edit = match params.find(|x| x.0 == "edit") {
+        Some(edit) => edit.1.parse::<bool>().unwrap_or_default(),
+        None => false,
+    };
+    let full_body = hyper::body::to_bytes(req.into_body()).await?;
+    let json = unsafe {
+        let json = blk2bstr(
+            full_body.as_ptr() as *const c_void,
+            full_body.len() as i32,
+        );
+        let mut err: DBWError = 0;
+        let answer = json_api_create_snippet(app.dbh.0, json, 0, edit.into(), &mut err);
+        let ret = CStr::from_ptr((*answer).data.cast()).to_str().unwrap().to_string();
+        *response.status_mut() = StatusCode::from_u16(err as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        bdestroy(json);
+        bdestroy(answer);
+        ret
+    };
+    *response.body_mut() = Body::from(json);
+    Ok(response)
+}
 
 async fn get_snippet_handler(
     req: Request<Body>,
@@ -126,24 +167,11 @@ async fn handler(req: Request<Body>, app: Arc<YNote>) -> Result<Response<Body>, 
         (&Method::GET, "/") => {
             *response.body_mut() = Body::from(r#"{"status": "ook"}"#);
         }
-        (&Method::GET, "/api/get_snippet") => {return get_snippet_handler(req, app).await;},
+        (&Method::GET, "/api/get_snippet") => {
+            return get_snippet_handler(req, app).await;
+        }
         (&Method::POST, "/api/create_snippet") => {
-            println!("{}", "jopa");
-            let full_body = hyper::body::to_bytes(req.into_body()).await?;
-            let v: Result<Value, serde_json::Error> = serde_json::from_str(
-                &String::from_utf8_lossy(&full_body.iter().cloned().collect::<Vec<u8>>()),
-            );
-
-            match v {
-                Err(e) => {
-                    *response.status_mut() = StatusCode::BAD_REQUEST;
-                    *response.body_mut() =
-                        Body::from(r#"{"status": "error", "msg": "wrong json"}"#);
-                }
-                Ok(v) => {
-                    *response.body_mut() = Body::from(format!("{}", v["data"]));
-                }
-            }
+            return create_snippet_handler(req, app).await;
         }
         _ => {
             *response.body_mut() = Body::from(r#"{"status": "ok"}"#);

@@ -139,27 +139,6 @@ static const char *const sendMessagelUrl =
                                                  \
   } while (0)
 
-#define JSON_GET_ITEM(json, obj, index)                        \
-  do {                                                         \
-                                                               \
-    json_value *ret = NULL;                                    \
-    if ((json) == NULL) {                                      \
-      obj = NULL;                                              \
-      break;                                                   \
-    }                                                          \
-    if (json->type != json_object) {                           \
-      obj = NULL;                                              \
-      break;                                                   \
-    }                                                          \
-                                                               \
-    for (unsigned int i = 0; i < json->u.object.length; ++i) { \
-      if (!strcmp(json->u.object.values[i].name, index)) {     \
-        ret = (json->u).object.values[i].value;                \
-        break;                                                 \
-      }                                                        \
-    }                                                          \
-    obj = ret;                                                 \
-  } while (0)
 
 #define LUA_CONF_READ_STRING(dst, src)               \
   do {                                               \
@@ -1357,11 +1336,11 @@ error:
 }
 
 static bstring
-json_api_delete_snippet(const struct YNoteApp *app, sqlite_int64 id) {
+json_api_delete_snippet(struct DBWHandler *db_handle, sqlite_int64 id) {
   int err = 0;
   bstring json_str_res = NULL;
 
-  id = dbw_edit_snippet(app->db_handle, id, NULL, NULL, NULL, NULL, 1, &err);
+  id = dbw_edit_snippet(db_handle, id, NULL, NULL, NULL, NULL, 1, &err);
   if (err == DBW_ERR_NOT_FOUND) {
     json_str_res = bformat("{\"status\": \"snippet %lld not found\"}", id);
     goto exit;
@@ -1379,11 +1358,11 @@ error:
   return NULL;
 }
 static bstring
-json_api_get_snippet(const struct YNoteApp *app, sqlite_int64 id, int render) {
+json_api_get_snippet(struct DBWHandler *db_handle, sqlite_int64 id, int render) {
   int err = 0;
   bstring json_str_res = NULL;
 
-  json_str_res = dbw_get_snippet(app->db_handle, id, &err);
+  json_str_res = dbw_get_snippet(db_handle, id, &err);
   if (err == DBW_ERR_NOT_FOUND) {
     bdestroy(json_str_res);
     json_str_res =
@@ -1450,7 +1429,7 @@ static void ev_json_api_get_snippet(
     edit = 1;
   }
   LOG_DEBUG("json_api_got_snippet got %lld", id);
-  json_str_res = json_api_get_snippet(app, id, !edit);
+  json_str_res = json_api_get_snippet(app->db_handle, id, !edit);
   if (json_str_res == NULL) {
     bad_request_msg = "{\"status\": \"snippet not found\"}";
     goto bad_request;
@@ -1629,7 +1608,7 @@ static void ev_json_api_delete_snippet(
     bad_request_msg = "malformed id";
     goto bad_request;
   }
-  json_str_res = json_api_delete_snippet(app, snippet_id);
+  json_str_res = json_api_delete_snippet(app->db_handle, snippet_id);
   CHECK(json_str_res != NULL, "Couldn't delete snippet");
   CHECK(
       evbuffer_add_reference(
@@ -1658,135 +1637,6 @@ exit:
 
   INTERNAL_ERROR_HANDLE;
   BAD_REQ_HANDLE;
-}
-
-static bstring json_api_create_snippet(
-    const struct YNoteApp *app,
-    bstring json_req,
-    sqlite_int64 snippet_id,
-    int edit,
-    int *ec) {
-  bstring ret = NULL;
-  json_value *json = NULL;
-  int err = 0;
-
-  bstrListEmb tags = {0};
-
-  CHECK(bdata(json_req) != NULL, "Null string");
-  json = json_parse(bdata(json_req), blength(json_req));
-
-  if (json == NULL) {
-    ret = bfromcstr("{\"status\": \"JSON Malformed\"}");
-    goto error_403;
-  }
-  if ((json->type) != json_object) {
-    ret = bfromcstr("{\"status\": \"Dict required\"}");
-    goto error_403;
-  }
-
-  struct tagbstring title = {0};
-  struct tagbstring content = {0};
-  struct tagbstring type = {0};
-
-  json_value *jtitle = NULL, *jcontent = NULL, *jtype = NULL;
-
-  JSON_GET_ITEM(json, jtitle, "title");
-  JSON_GET_ITEM(json, jcontent, "content");
-  JSON_GET_ITEM(json, jtype, "type");
-
-// In this macro we check that json values we got above are strings
-// and that they are not NULL if we are creating snippet (not editing)
-// otherwise just check they are strings, and then assign they to the
-// corresponging tagbstrings
-#define CHECK_J(tbstr, edit)                                         \
-  do {                                                               \
-    if (!(edit)) {                                                   \
-      if ((j##tbstr) == NULL || (j##tbstr)->type != json_string) {   \
-        ret = bfromcstr("{\"status\": \"" #tbstr                     \
-                        " required and must be string");             \
-        goto error_403;                                              \
-      }                                                              \
-    } else {                                                         \
-      if ((j##tbstr) != NULL && (j##tbstr)->type != json_string) {   \
-        ret = bfromcstr("{\"status\": \"" #tbstr " must be string"); \
-        goto error_403;                                              \
-      }                                                              \
-    }                                                                \
-    if ((j##tbstr) != NULL) {                                        \
-      btfromcstr(tbstr, (j##tbstr)->u.string.ptr);                   \
-    }                                                                \
-  } while (0)
-
-  CHECK_J(title, edit);
-  CHECK_J(content, edit);
-  CHECK_J(type, edit);
-  LOG_DEBUG("type is %s", bdata(&type));
-  LOG_DEBUG("title is %s", bdata(&title));
-
-#undef CHECK_J
-
-  json_value *jtags = NULL;
-  JSON_GET_ITEM(json, jtags, "tags");
-  if (jtags != NULL && jtags->type == json_array) {
-
-    /* Manual bstrList handling to eliminate unnecessary mallocs */
-
-    struct tagbstring tbtmp = {0};
-    for (unsigned int i = 0; i < jtags->u.array.length; i++) {
-      if (jtags->u.array.values[i]->type != json_string) {
-        ret = bfromcstr("{\"status\": \"tags must be an array of strings\"");
-        goto error_403;
-      }
-
-      blk2tbstr(
-          tbtmp,
-          jtags->u.array.values[i]->u.string.ptr,
-          jtags->u.array.values[i]->u.string.length);
-
-      rv_push(tags, tbtmp, NULL);
-    }
-  }
-
-  if (edit) {
-    snippet_id = dbw_edit_snippet(
-        app->db_handle, snippet_id, &title, &content, &type, &tags, 0, &err);
-  } else {
-    snippet_id =
-        dbw_new_snippet(app->db_handle, &title, &content, &type, &tags, &err);
-  }
-  if (err == DBW_ERR_NOT_FOUND) {
-    ret = bfromcstr("{\"status\": \"error\", \"msg\": \"wrong type\"");
-    goto error_403;
-  } else if (err == DBW_ERR_ALREADY_EXISTS) {
-    ret = bfromcstr("{\"status\": \"error\", \"msg\": \"already exists error. "
-                    "possibly snippet with this "
-                    "title alredy exists\"}");
-    goto error_403;
-
-  } else if (err != DBW_OK) {
-    goto error;
-  }
-  ret = bformat("{\"status\": \"ok\", \"id\": %lld}", snippet_id);
-
-  if (ec != NULL) {
-    *ec = 200;
-  }
-exit:
-  if (json != NULL) {
-    json_value_free(json);
-  }
-  rv_destroy(tags);
-  return ret;
-error_403:
-  if (ec != NULL) {
-    *ec = 403;
-  }
-  goto exit;
-error:
-  if (ec != NULL) {
-    *ec = 500;
-  }
-  goto exit;
 }
 
 static void ev_json_api_create_snippet(
@@ -2543,7 +2393,7 @@ mhd_api_delete_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, status_id_required, ret);
   }
-  json_str_res = json_api_delete_snippet(ci->app, id);
+  json_str_res = json_api_delete_snippet(ci->app->db_handle, id);
   if (json_str_res == NULL) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection,
