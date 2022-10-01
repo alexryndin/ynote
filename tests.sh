@@ -117,7 +117,7 @@ run_tests() {
     test['method']=''
     test['api']="/api/get_snippet"
     test['query']='?id=10'
-    test['compare']='{"status":"err","msg":"snippet not found"}'
+    test['compare']='{"status":"error","msg":"snippet not found"}'
     run_test_on_port $PORT test
 }
 

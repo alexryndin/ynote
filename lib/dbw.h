@@ -1,5 +1,5 @@
-#include <bstrlib.h>
 #include <bbstrlib.h>
+#include <bstrlib.h>
 #include <json.h>
 #include <md4c.h>
 #include <rvec.h>
@@ -28,41 +28,41 @@
   } while (0)
 
 typedef enum DBWType {
-    DBW_INTEGER,
-    DBW_UNKN,
+  DBW_INTEGER,
+  DBW_UNKN,
 
 } DBWType;
 
 typedef enum DBWResType {
-    DBW_TUPLES = 0,
-    DBW_TYPES,
+  DBW_TUPLES = 0,
+  DBW_TYPES,
 } DBWResType;
 
 typedef enum DBWError {
-    DBW_OK = 0,
-    DBW_ERR = -1,
-    DBW_ERR_NOT_FOUND = -2,
-    DBW_ERR_UNKN_DB = -3,
-    DBW_ERR_ALREADY_EXISTS = -4,
+  DBW_OK = 0,
+  DBW_ERR = -1,
+  DBW_ERR_NOT_FOUND = -2,
+  DBW_ERR_UNKN_DB = -3,
+  DBW_ERR_ALREADY_EXISTS = -4,
 } DBWDBError;
 
 typedef struct DBWResult {
-    int res_type;
-    rvec_t(bstring) head_vec;
-    union {
-        rvec_t(bstring) res_vec;
-        rvec_t(int) types_vec;
-    };
+  int res_type;
+  rvec_t(bstring) head_vec;
+  union {
+    rvec_t(bstring) res_vec;
+    rvec_t(int) types_vec;
+  };
 } DBWResult;
 
 typedef enum DBWDBType {
-    DBW_POSTGRESQL,
-    DBW_SQLITE3,
+  DBW_POSTGRESQL,
+  DBW_SQLITE3,
 } DBWDBType;
 
 typedef struct DBWHandler {
-    int DBWDBType;
-    void *conn;
+  int DBWDBType;
+  void *conn;
 } DBWHandler;
 
 DBWHandler *dbw_connect(DBWDBType DBWDBType, const bstring url, int *err);
@@ -112,3 +112,6 @@ bstring json_api_create_snippet(
     sqlite_int64 snippet_id,
     int edit,
     int *ec);
+
+bstring json_api_find_snippets(
+    struct DBWHandler *db_handle, bstring title, bstring type, bstring tags, int *ec);

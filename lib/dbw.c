@@ -145,6 +145,47 @@ static struct tagbstring __integer = bsStatic("integer");
 // forward declarations
 static DBWResult *DBWResult_create(int t);
 
+bstring json_api_find_snippets(
+    struct DBWHandler *db_handle,
+    bstring title,
+    bstring type,
+    bstring tags,
+    int *ec) {
+  bstrListEmb *taglist = NULL;
+  int err = DBW_OK;
+  bstring ret = NULL;
+
+  if (tags != NULL && blength(tags) > 0) {
+    taglist = bsplit_noalloc(tags, ',');
+    CHECK(taglist != NULL, "Couldn't split tags string");
+  } else {
+    taglist = calloc(1, sizeof(bstrListEmb));
+    CHECK(taglist != NULL, "Couldn't create empty taglist");
+  }
+  if (ec != NULL) {
+    *ec = 200;
+  }
+  ret = dbw_find_snippets(db_handle, title, type, taglist, &err);
+  if (err != DBW_OK) {
+    goto error;
+  }
+exit:
+  if (taglist != NULL) {
+    bstrListEmb_destroy(taglist);
+  }
+  return ret;
+error_403:
+  if (ec != NULL) {
+    *ec = 403;
+  }
+  goto exit;
+error:
+  if (ec != NULL) {
+    *ec = 500;
+  }
+  goto exit;
+}
+
 bstring json_api_create_snippet(
     struct DBWHandler *db_handle,
     bstring json_req,
@@ -273,7 +314,6 @@ error:
   }
   goto exit;
 }
-
 
 // ******************************
 // * SQLite
@@ -604,9 +644,9 @@ static enum DBWError sqlite3_unbind_tags(
 
   if (rv_len(*tags) > 0) {
     CHECK(
-        (q = bformat(
-             "DELETE FROM %s WHERE snippet_id = ? AND tag_id NOT IN (SELECT id "
-             "FROM " TAGS_TABLE " WHERE name IN (")) != NULL,
+        (q = bformat("DELETE FROM %s WHERE snippet_id = ? AND tag_id NOT IN "
+                     "(SELECT id "
+                     "FROM " TAGS_TABLE " WHERE name IN (")) != NULL,
         "Couldn't create query string");
     STR_APPEND_PATTERN(q, "?,", rv_len(*tags));
     CHECK(bcatcstr(q, "))") == BSTR_OK, "Couldn't create query string");

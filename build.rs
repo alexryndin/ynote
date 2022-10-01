@@ -1,6 +1,5 @@
 use bindgen;
 
-use cc;
 use std::env;
 use std::path::PathBuf;
 

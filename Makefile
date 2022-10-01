@@ -29,7 +29,7 @@ EXTERNAL_SRC=$(wildcard contrib/**/bstring/bstrlib.c contrib/**/src/*.c contrib/
 EXTERNAL_SRC_NO_TESTS=$(filter-out %test.c, $(EXTERNAL_SRC))
 EXTERNAL=$(patsubst %.c,%.o,$(EXTERNAL_SRC_NO_TESTS))
 
-all: $(BIN) $(SHARED) tests bindgen
+all: $(BIN) $(SHARED) tests
 
 bindgen:
 	BINDGEN_EXTRA_CLANG_ARGS="-Icontrib/chelpers/src -Icontrib/bstring/bstring -Icontrib/json-parser" bindgen lib/dbw.h

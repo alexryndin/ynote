@@ -12326,6 +12326,15 @@ extern "C" {
         ec: *mut ::std::os::raw::c_int,
     ) -> bstring;
 }
+extern "C" {
+    pub fn json_api_find_snippets(
+        db_handle: *mut DBWHandler,
+        title: bstring,
+        type_: bstring,
+        tags: bstring,
+        ec: *mut ::std::os::raw::c_int,
+    ) -> bstring;
+}
 pub type __builtin_va_list = [__va_list_tag; 1usize];
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
