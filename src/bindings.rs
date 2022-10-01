@@ -11932,6 +11932,24 @@ fn bindgen_test_layout_fts5_api() {
         )
     );
 }
+extern "C" {
+    pub static mut s_true: tagbstring;
+}
+extern "C" {
+    pub static status_ok: tagbstring;
+}
+extern "C" {
+    pub static status_method_not_allowed: tagbstring;
+}
+extern "C" {
+    pub static status_server_error: tagbstring;
+}
+extern "C" {
+    pub static status_id_required: tagbstring;
+}
+extern "C" {
+    pub static status_snippet_not_found: tagbstring;
+}
 pub const DBWType_DBW_INTEGER: DBWType = 0;
 pub const DBWType_DBW_UNKN: DBWType = 1;
 pub type DBWType = u32;
@@ -12332,6 +12350,14 @@ extern "C" {
         title: bstring,
         type_: bstring,
         tags: bstring,
+        ec: *mut ::std::os::raw::c_int,
+    ) -> bstring;
+}
+extern "C" {
+    pub fn json_api_get_snippet(
+        db_handle: *mut DBWHandler,
+        id: sqlite_int64,
+        render: ::std::os::raw::c_int,
         ec: *mut ::std::os::raw::c_int,
     ) -> bstring;
 }

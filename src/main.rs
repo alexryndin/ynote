@@ -1,13 +1,16 @@
 use dbw::{
     bdestroy, bfromcstr, blk2bstr, bstring, dbw_connect, dbw_get_snippet, json_api_create_snippet,
-    json_api_find_snippets, tagbstring, DBWDBType, DBWDBType_DBW_SQLITE3, DBWError,
-    DBWError_DBW_ERR_ALREADY_EXISTS, DBWError_DBW_ERR_NOT_FOUND, DBWError_DBW_OK, DBWHandler,
+    json_api_find_snippets, json_api_get_snippet, tagbstring, DBWDBType, DBWDBType_DBW_SQLITE3,
+    DBWError, DBWError_DBW_ERR_ALREADY_EXISTS, DBWError_DBW_ERR_NOT_FOUND, DBWError_DBW_OK,
+    DBWHandler,
 };
+use bytes::Bytes;
 use hyper::http::{Request, Response, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Server};
 use serde::{Deserialize, Serialize};
 use serde_json::{Error, Value};
+use std::borrow::{Borrow, Cow};
 use std::convert::Infallible;
 use std::error;
 use std::ffi::c_void;
@@ -19,6 +22,7 @@ use std::os::raw::{c_int, c_uchar};
 use std::ptr::{null, null_mut};
 use std::str;
 use std::sync::{Arc, Mutex};
+use std::ops::Deref;
 
 use url;
 
@@ -32,8 +36,37 @@ unsafe impl<T> Sync for SendPtr<T> {}
 struct Bstring(bstring);
 impl Drop for Bstring {
     fn drop(&mut self) {
+        println!("bstirng dropped");
         unsafe {
             bdestroy(self.0);
+        }
+    }
+}
+
+impl Deref for Bstring{
+    type Target = str;
+
+    fn deref<'a>(&'a self) -> &'a str {
+        let c_str = unsafe { CStr::from_ptr((*self.0).data.cast()) };
+        c_str.to_str().unwrap()
+    }
+}
+
+impl TryInto<Bytes> for Bstring {
+    type Error = ();
+    fn try_into(self) -> Result<Bytes, Self::Error> {
+        if std::ptr::eq(self.0, null()) {
+            return Err(());
+        }
+
+        unsafe {
+            if std::ptr::eq((*self.0).data, null()) {
+                return Err(());
+            }
+            let ret = Ok(Bytes::from(CStr::from_ptr((*self.0).data.cast()).to_bytes()));
+            (*self.0).data = null_mut();
+            bdestroy(self.0);
+            ret
         }
     }
 }
@@ -223,10 +256,15 @@ async fn get_snippet_handler(
 ) -> Result<Response<Body>, hyper::Error> {
     let mut response = Response::new(Body::empty());
     let mut err: DBWError = 0;
-    let mut params = url::form_urlencoded::parse(&req.uri().query().unwrap_or_default().as_bytes());
+    let mut params: Vec<(Cow<str>, Cow<str>)> =
+        url::form_urlencoded::parse(&req.uri().query().unwrap_or_default().as_bytes()).collect();
     //   let params = &req.uri().query();
     // let params = url::Url::parse(&req.uri().to_string()).unwrap().query_pairs();
-    let id = params.find(|x| x.0 == "id");
+    let edit = match params.iter().find(|x| x.0 == "tags") {
+        Some(edit) => edit.1.parse::<bool>().unwrap_or_default(),
+        None => false,
+    };
+    let id = params.iter().find(|x| x.0 == "id");
     match id {
         None => {
             *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -243,29 +281,18 @@ async fn get_snippet_handler(
                     return Ok(response);
                 }
                 Ok(id) => unsafe {
-                    let snippet = dbw_get_snippet(app.dbh.0, id, &mut err);
-                    match err {
-                        DBWError_DBW_OK => {
-                            let snippet = CStr::from_ptr((*snippet).data.cast()).to_str().unwrap().to_string();
-                            *response.body_mut() = Body::from(snippet);
-                        }
-                        DBWError_DBW_ERR_NOT_FOUND => {
-                            *response.status_mut() = StatusCode::NOT_FOUND;
-                            *response.body_mut() =
-                                Body::from(r#"{"status": "error", "msg": "Snippet not found"}"#);
-                        }
-                        _ => {
-                            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                            *response.body_mut() =
-                                Body::from(r#"{"status": "error", "msg": "internal error"}"#);
-                        }
-                    }
-                    bdestroy(snippet);
+                    let bsnippet = json_api_get_snippet(app.dbh.0, id, (!edit).into(), &mut err);
+                    *response.status_mut() = StatusCode::from_u16(err as u16)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    let snippet = CStr::from_ptr((*bsnippet).data.cast());
+                    let snippet: String = snippet.to_str().unwrap().to_owned();
+                    *response.body_mut() = Body::from(snippet);
+                    bdestroy(bsnippet);
                 },
             }
         }
     }
-                            Ok(response)
+    Ok(response)
 }
 
 async fn handler(req: Request<Body>, app: Arc<YNote>) -> Result<Response<Body>, hyper::Error> {
@@ -301,11 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Arc::new(YNote {
         dbh: unsafe {
             let path = bfromcstr(CStr::from_bytes_with_nul(b"test.db\0").unwrap().as_ptr());
-            let h = dbw_connect(
-                DBWDBType_DBW_SQLITE3,
-                path,
-                null_mut(),
-            );
+            let h = dbw_connect(DBWDBType_DBW_SQLITE3, path, null_mut());
             bdestroy(path);
             assert!(!std::ptr::eq(h, null()));
             SendPtr(h)

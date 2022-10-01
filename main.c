@@ -11,8 +11,6 @@
 #include <json.h>
 #include <lauxlib.h>
 #include <lualib.h>
-#include <md4c-html.h>
-#include <md4c.h>
 #include <microhttpd.h>
 #include <rvec.h>
 #include <signal.h>
@@ -30,21 +28,6 @@
 
 #define USAGE "Usage: %s -c|--conf config path\n"
 
-static struct tagbstring s_true = bsStatic("true");
-
-static const struct tagbstring status_ok = bsStatic("{\"status\": \"ok\"}");
-
-static const struct tagbstring status_method_not_allowed =
-    bsStatic("{\"status\": \"error\", \"msg\": \"method not allowed\"}");
-
-static const struct tagbstring status_server_error =
-    bsStatic("{\"status\": \"error\", \"msg\": \"server error\"}");
-
-static const struct tagbstring status_id_required =
-    bsStatic("{\"status\": \"error\", \"msg\": \"id required\"}");
-
-static const struct tagbstring status_snippet_not_found =
-    bsStatic("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
 
 static const char *const getUpdatesUrl =
     "https://api.telegram.org/bot%s/getUpdates?timeout=%d&offset=%d";
@@ -1242,95 +1225,6 @@ static void bstring_free_cb(const void *data, size_t datalen, void *extra) {
     bdestroy(str);
 }
 
-static void bstring_append(const MD_CHAR *ptr, MD_SIZE size, void *str) {
-  CHECK(str != NULL, "Null str");
-  CHECK(bcatblk(str, ptr, size) == BSTR_OK, "Couldn't append to string");
-
-error:
-  return;
-}
-
-static int render_json(bstring *json_str) {
-  int rc = 0;
-  json_value *json = NULL;
-  json_value *json_tmp = NULL;
-  json_value *json_result = NULL;
-  bstring new_json_str = NULL;
-  bstring html_str = NULL;
-
-  json_settings js = {.value_extra = json_builder_extra};
-  json_serialize_opts jso = {.mode = json_serialize_mode_packed};
-  CHECK(json_str != NULL && bdata(*json_str) != NULL, "Null json");
-
-  json = json_parse_ex(&js, bdata(*json_str), blength(*json_str), NULL);
-
-  CHECK(json != NULL, "Couldn't parse json");
-
-  JSON_GET_ITEM(json, json_result, "result");
-  CHECK(json_result != NULL, "Incorrect json");
-
-  JSON_GET_ITEM(json_result, json_tmp, "type");
-  CHECK(json_tmp != NULL && json_tmp->type == json_string, "Incorrect json");
-
-  LOG_DEBUG(
-      "type is %s, len is %d",
-      json_tmp->u.string.ptr,
-      json_tmp->u.string.length);
-
-  if (!strcmp(json_tmp->u.string.ptr, "markdown")) {
-    JSON_GET_ITEM(json_result, json_tmp, "content");
-    CHECK(json_tmp != NULL && json_tmp->type == json_string, "Incorrect json");
-
-    html_str = bfromcstr("");
-    CHECK(html_str != NULL, "Couldn't create string");
-
-    CHECK(
-        md_html(
-            json_tmp->u.string.ptr,
-            json_tmp->u.string.length,
-            bstring_append,
-            html_str,
-            0,
-            0) == 0,
-        "Couldn't render markdown snippet");
-
-    CHECK(bdata(html_str) != NULL, "Couldn't render markdown");
-
-    free(json_tmp->u.string.ptr);
-    json_tmp->u.string.ptr = bdata(html_str);
-    json_tmp->u.string.length = blength(html_str);
-
-    html_str->data = NULL;
-    free(html_str);
-    html_str = NULL;
-    CHECK(
-        (new_json_str = bfromcstralloc(json_measure_ex(json, jso), "")) != NULL,
-        "Coudn't create string");
-
-    json_serialize_ex(bdata(new_json_str), json, jso);
-    CHECK(bdestroy(*json_str) == BSTR_OK, "Couldn't destory old json");
-    new_json_str->slen = new_json_str->mlen - 1;
-    *json_str = new_json_str;
-    new_json_str = NULL;
-  }
-  LOG_DEBUG("%s", bdata(*json_str));
-
-exit:
-  if (json != NULL) {
-    json_value_free(json);
-  }
-  if (new_json_str != NULL) {
-    bdestroy(new_json_str);
-  }
-  if (html_str != NULL) {
-    bdestroy(html_str);
-  }
-  return rc;
-error:
-  rc = -1;
-  goto exit;
-}
-
 static bstring
 json_api_delete_snippet(struct DBWHandler *db_handle, sqlite_int64 id) {
   int err = 0;
@@ -1344,34 +1238,6 @@ json_api_delete_snippet(struct DBWHandler *db_handle, sqlite_int64 id) {
     CHECK(err == DBW_OK, "Couldn't delete snippet");
   }
   json_str_res = bformat("{\"status\": \"ok\", \"id\": %lld}", id);
-
-exit:
-  return json_str_res;
-error:
-  if (json_str_res != NULL) {
-    bdestroy(json_str_res);
-  }
-  return NULL;
-}
-static bstring json_api_get_snippet(
-    struct DBWHandler *db_handle, sqlite_int64 id, int render) {
-  int err = 0;
-  bstring json_str_res = NULL;
-
-  json_str_res = dbw_get_snippet(db_handle, id, &err);
-  if (err == DBW_ERR_NOT_FOUND) {
-    bdestroy(json_str_res);
-    json_str_res =
-        bfromcstr("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
-    goto exit;
-  }
-  CHECK(
-      json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
-      "Couldn't get snippets");
-
-  if (render) {
-    CHECK(render_json(&json_str_res) == 0, "Couldn't render json");
-  }
 
 exit:
   return json_str_res;
@@ -1423,11 +1289,14 @@ static void ev_json_api_get_snippet(
   if (edit_str != NULL && biseqcstrcaseless(&s_true, edit_str)) {
     edit = 1;
   }
-  LOG_DEBUG("json_api_got_snippet got %lld", id);
-  json_str_res = json_api_get_snippet(app->db_handle, id, !edit);
+  LOG_DEBUG("json_api_get_snippet got %lld", id);
+  json_str_res = json_api_get_snippet(app->db_handle, id, !edit, &ret_code);
   if (json_str_res == NULL) {
-    bad_request_msg = "{\"status\": \"snippet not found\"}";
-    goto bad_request;
+    goto error;
+  }
+
+  if (ret_code == 404) {
+    reason = "Not Found";
   }
 
   CHECK(
@@ -1452,6 +1321,7 @@ exit:
   if (json_str_res != NULL) {
     bdestroy(json_str_res);
   }
+  LOG_DEBUG("Ret code is %i", ret_code);
   return;
 
 error:
@@ -2410,6 +2280,7 @@ mhd_api_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
   int rc = 0;
   const char *edit_str = NULL;
   char edit = 0;
+  int ret_code = 200;
   bstring json_str_res = NULL;
 
   edit_str =
@@ -2436,7 +2307,7 @@ mhd_api_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, status_id_required, ret);
   }
-  json_str_res = json_api_get_snippet(ci->app->db_handle, id, !edit);
+  json_str_res = json_api_get_snippet(ci->app->db_handle, id, !edit, &ret_code);
   LOG_DEBUG("json_str_res is %s", bdata(json_str_res));
   if (json_str_res == NULL) {
     MHD_RESPONSE_WITH_TAGBSTRING(
@@ -2447,7 +2318,7 @@ mhd_api_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
         ret);
   }
   MHD_RESPONSE_WITH_BSTRING(
-      connection, MHD_HTTP_OK, response, json_str_res, ret);
+      connection, ret_code, response, json_str_res, ret);
 exit:
   return ret;
 error:

@@ -5,6 +5,22 @@
 #include <rvec.h>
 #include <sqlite3.h>
 
+static struct tagbstring s_true = bsStatic("true");
+
+static const struct tagbstring status_ok = bsStatic("{\"status\": \"ok\"}");
+
+static const struct tagbstring status_method_not_allowed =
+    bsStatic("{\"status\": \"error\", \"msg\": \"method not allowed\"}");
+
+static const struct tagbstring status_server_error =
+    bsStatic("{\"status\": \"error\", \"msg\": \"server error\"}");
+
+static const struct tagbstring status_id_required =
+    bsStatic("{\"status\": \"error\", \"msg\": \"id required\"}");
+
+static const struct tagbstring status_snippet_not_found =
+    bsStatic("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
+
 #define JSON_GET_ITEM(json, obj, index)                        \
   do {                                                         \
                                                                \
@@ -114,4 +130,11 @@ bstring json_api_create_snippet(
     int *ec);
 
 bstring json_api_find_snippets(
-    struct DBWHandler *db_handle, bstring title, bstring type, bstring tags, int *ec);
+    struct DBWHandler *db_handle,
+    bstring title,
+    bstring type,
+    bstring tags,
+    int *ec);
+
+bstring
+json_api_get_snippet(struct DBWHandler *db_handle, sqlite_int64 id, int render, int *ec);

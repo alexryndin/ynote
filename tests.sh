@@ -30,7 +30,7 @@ run_test_on_port() {
     echo "Body ${test[body]}"
 
     if [[ -z "${test[body]}" ]]; then
-        response=$(curl -fs -X "${test[method]:-GET}" http://${test[host]}:${test[port]}${test[api]}${test[query]} | jq -c 'del(.result.created, .result.updated)')
+        response=$(curl -s -X "${test[method]:-GET}" http://${test[host]}:${test[port]}${test[api]}${test[query]} | jq -c 'del(.result.created, .result.updated)')
     else
         response=$(echo "${test[body]}" | curl -s "http://${test[host]}:${test[port]}${test[api]}${test[query]}" --data-binary @- | jq -c 'del(.result.created, .result.updated)')
     fi
@@ -127,13 +127,13 @@ rm test.db
 ($VALGRIND ./main -c test.lua ) &
 
 # TODO: better server starter
-sleep 1
+sleep 10
 run_tests 8080
 kill %1
 rm test.db
 ./init_db.sh test.db
 ($VALGRIND ./main -c test.lua ) &
-sleep 1
+sleep 10
 run_tests 8083
 
 rm -rf uploads || true
