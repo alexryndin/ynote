@@ -1,10 +1,10 @@
+use bytes::Bytes;
 use dbw::{
     bdestroy, bfromcstr, blk2bstr, bstring, dbw_connect, dbw_get_snippet, json_api_create_snippet,
-    json_api_find_snippets, json_api_get_snippet, tagbstring, DBWDBType, DBWDBType_DBW_SQLITE3,
-    DBWError, DBWError_DBW_ERR_ALREADY_EXISTS, DBWError_DBW_ERR_NOT_FOUND, DBWError_DBW_OK,
-    DBWHandler,
+    json_api_find_snippets, json_api_get_snippet, strlen, tagbstring, DBWDBType,
+    DBWDBType_DBW_SQLITE3, DBWError, DBWError_DBW_ERR_ALREADY_EXISTS, DBWError_DBW_ERR_NOT_FOUND,
+    DBWError_DBW_OK, DBWHandler,
 };
-use bytes::Bytes;
 use hyper::http::{Request, Response, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Server};
@@ -12,60 +12,108 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Error, Value};
 use std::borrow::{Borrow, Cow};
 use std::convert::Infallible;
+use std::env::args;
 use std::error;
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::fmt;
+use std::fs;
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
-use std::os::raw::{c_int, c_uchar};
+use std::ops::Deref;
+use std::os::raw::{c_char, c_int, c_uchar};
 use std::ptr::{null, null_mut};
 use std::str;
 use std::sync::{Arc, Mutex};
-use std::ops::Deref;
+use toml;
 
 use url;
 
 struct YNote {
     dbh: SendPtr<*mut DBWHandler>,
+    dbpath: String,
+    confpath: String,
+    addr: SocketAddr,
+}
+
+impl Default for YNote {
+    fn default() -> YNote {
+        YNote {
+            dbh: SendPtr(null_mut()),
+            dbpath: "./main.db".to_owned(),
+            confpath: "".to_owned(),
+            addr: "127.0.0.1:3000".parse().unwrap(),
+        }
+    }
 }
 
 unsafe impl<T> Send for SendPtr<T> {}
 unsafe impl<T> Sync for SendPtr<T> {}
 
-struct Bstring(bstring);
+enum BstringKind {
+    Owned,
+    FromCString,
+}
+struct Bstring {
+    k: BstringKind,
+    s: bstring,
+}
 impl Drop for Bstring {
     fn drop(&mut self) {
         println!("bstirng dropped");
-        unsafe {
-            bdestroy(self.0);
+        match &self.k {
+            BstringKind::Owned => unsafe {
+                bdestroy(self.s);
+            },
+            BstringKind::FromCString => unsafe {
+                if !std::ptr::eq(self.s, null()) && !std::ptr::eq((*self.s).data, null()) {
+                    let _ = CString::from_raw((*self.s).data.cast());
+                    let _ = Box::from_raw(self.s);
+                }
+            },
         }
     }
 }
 
-impl Deref for Bstring{
+impl Deref for Bstring {
     type Target = str;
 
     fn deref<'a>(&'a self) -> &'a str {
-        let c_str = unsafe { CStr::from_ptr((*self.0).data.cast()) };
+        let c_str = unsafe { CStr::from_ptr((*self.s).data.cast()) };
         c_str.to_str().unwrap()
+    }
+}
+impl From<String> for Bstring {
+    fn from(item: String) -> Self {
+        unsafe {
+            let path = CString::from_vec_unchecked(item.into());
+            let tb = Box::new(btfromcstr(path.into_raw().cast()));
+            assert!(!std::ptr::eq(tb.data, null()));
+            Bstring {
+                k: BstringKind::FromCString,
+                s: Box::into_raw(tb),
+            }
+        }
     }
 }
 
 impl TryInto<Bytes> for Bstring {
     type Error = ();
     fn try_into(self) -> Result<Bytes, Self::Error> {
-        if std::ptr::eq(self.0, null()) {
+        if std::ptr::eq(self.s, null()) {
             return Err(());
         }
 
         unsafe {
-            if std::ptr::eq((*self.0).data, null()) {
+            if std::ptr::eq((*self.s).data, null()) {
                 return Err(());
             }
-            let ret = Ok(Bytes::from(CStr::from_ptr((*self.0).data.cast()).to_bytes()));
-            (*self.0).data = null_mut();
-            bdestroy(self.0);
+            let ret = Ok(Bytes::from(
+                CStr::from_ptr((*self.s).data.cast()).to_bytes(),
+            ));
+            (*self.s).data = null_mut();
+            bdestroy(self.s);
             ret
         }
     }
@@ -122,6 +170,20 @@ fn blk2tbstr(s: *mut c_uchar, l: c_int) -> tagbstring {
     }
 }
 
+fn btfromcstr(s: *mut c_uchar) -> tagbstring {
+    tagbstring {
+        data: s,
+        slen: if std::ptr::eq(s, null()) {
+            0
+        } else {
+            unsafe { strlen(s as *const i8) }
+        }
+        .try_into()
+        .unwrap_or(i32::MAX),
+        mlen: -1,
+    }
+}
+
 async fn find_snippets_handler(
     req: Request<Body>,
     app: Arc<YNote>,
@@ -159,7 +221,7 @@ async fn find_snippets_handler(
             Some(title) => {
                 let len = title.len().try_into().unwrap_or(i32::MAX);
                 Some(blk2tbstr(
-                    CString::new(title).unwrap().into_raw() as *mut u8,
+                    CString::from_vec_unchecked(title.into_bytes()).into_raw() as *mut u8,
                     len,
                 ))
             }
@@ -169,7 +231,7 @@ async fn find_snippets_handler(
             Some(tags) => {
                 let len = tags.len().try_into().unwrap_or(i32::MAX);
                 Some(blk2tbstr(
-                    CString::new(tags).unwrap().into_raw() as *mut u8,
+                    CString::from_vec_unchecked(tags.into_bytes()).into_raw() as *mut u8,
                     len,
                 ))
             }
@@ -179,7 +241,7 @@ async fn find_snippets_handler(
             Some(r#type) => {
                 let len = r#type.len().try_into().unwrap_or(i32::MAX);
                 Some(blk2tbstr(
-                    CString::new(r#type).unwrap().into_raw() as *mut u8,
+                    CString::from_vec_unchecked(r#type.into_bytes()).into_raw() as *mut u8,
                     len,
                 ))
             }
@@ -284,10 +346,15 @@ async fn get_snippet_handler(
                     let bsnippet = json_api_get_snippet(app.dbh.0, id, (!edit).into(), &mut err);
                     *response.status_mut() = StatusCode::from_u16(err as u16)
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                    let snippet = CStr::from_ptr((*bsnippet).data.cast());
-                    let snippet: String = snippet.to_str().unwrap().to_owned();
-                    *response.body_mut() = Body::from(snippet);
-                    bdestroy(bsnippet);
+                    if std::ptr::eq(bsnippet, null()) {
+                        *response.body_mut() = Body::from("error");
+                        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    } else {
+                        let snippet = CStr::from_ptr((*bsnippet).data.cast());
+                        let snippet: String = snippet.to_str().unwrap().to_owned();
+                        *response.body_mut() = Body::from(snippet);
+                        bdestroy(bsnippet);
+                    }
                 },
             }
         }
@@ -323,16 +390,59 @@ fn use_counter(counter: Arc<Mutex<u64>>) -> Response<Body> {
     Response::new(Body::from(format!("Counter: {}\n", data)))
 }
 
+impl YNote {
+    fn new() -> YNote {
+        YNote {
+            ..Default::default()
+        }
+    }
+    fn read_config(self: &mut YNote) {
+        if self.confpath == "" {
+            return;
+        }
+        let config = fs::read_to_string(&self.confpath).expect("Couldn't read config");
+        let value = config
+            .parse::<toml::Value>()
+            .expect("Couldn't parse config");
+        self.addr = value
+            .get("host")
+            .map(toml::Value::as_str)
+            .unwrap_or(Some("127.0.0.1:3000"))
+            .expect("host must be string")
+            .parse()
+            .expect("Couldn't parse host");
+
+        self.dbpath = value
+            .get("db_path")
+            .map(toml::Value::as_str)
+            .unwrap_or(Some("./test.db"))
+            .expect("db_path must be string")
+            .to_owned()
+    }
+    fn parse_cli_options(self: &mut YNote) {
+        let mut opts = args();
+        while let Some(opt) = opts.next() {
+            if opt == "-c" {
+                let path = opts.next().expect("-c require argument");
+                self.confpath = path;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = YNote::new();
+    app.parse_cli_options();
+    app.read_config();
     let app = Arc::new(YNote {
         dbh: unsafe {
-            let path = bfromcstr(CStr::from_bytes_with_nul(b"test.db\0").unwrap().as_ptr());
-            let h = dbw_connect(DBWDBType_DBW_SQLITE3, path, null_mut());
-            bdestroy(path);
+            let path: Bstring = app.dbpath.to_owned().into();
+            let h = dbw_connect(DBWDBType_DBW_SQLITE3, path.s, null_mut());
             assert!(!std::ptr::eq(h, null()));
             SendPtr(h)
         },
+        ..Default::default()
     });
     // We'll bind to 127.0.0.1:3000
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));

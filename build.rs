@@ -28,6 +28,7 @@ fn main() {
         .clang_arg("-Icontrib/chelpers/src")
         .clang_arg("-Icontrib/bstring/bstring")
         .clang_arg("-Icontrib/json-parser")
+        .clang_arg("-Icontrib/md4c/src")
         .clang_arg("-Ilib")
         .header("wrapper.h")
         // Tell cargo to invalidate the built crate whenever any of the
