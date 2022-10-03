@@ -176,7 +176,7 @@ fn btfromcstr(s: *mut c_uchar) -> tagbstring {
         slen: if std::ptr::eq(s, null()) {
             0
         } else {
-            unsafe { strlen(s as *const i8) }
+            unsafe { strlen(s.cast()) }
         }
         .try_into()
         .unwrap_or(i32::MAX),
@@ -266,9 +266,9 @@ async fn find_snippets_handler(
         );
 
         // free allocated CStrings
-        let _ = title.map(|x| CString::from_raw(x.data as *mut i8));
-        let _ = tags.map(|x| CString::from_raw(x.data as *mut i8));
-        let _ = r#type.map(|x| CString::from_raw(x.data as *mut i8));
+        let _ = title.map(|x| CString::from_raw(x.data.cast()));
+        let _ = tags.map(|x| CString::from_raw(x.data.cast()));
+        let _ = r#type.map(|x| CString::from_raw(x.data.cast()));
 
         *response.body_mut() = Body::from(
             CStr::from_ptr((*answer).data.cast())
