@@ -5,9 +5,12 @@ use dbw::{
     DBWDBType_DBW_SQLITE3, DBWError, DBWError_DBW_ERR_ALREADY_EXISTS, DBWError_DBW_ERR_NOT_FOUND,
     DBWError_DBW_OK, DBWHandler,
 };
+use hyper::header::CONTENT_TYPE;
 use hyper::http::{Request, Response, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Server};
+use multer;
+use multer::Multipart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Error, Value};
 use std::borrow::{Borrow, Cow};
@@ -19,13 +22,13 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::fmt;
 use std::fs;
-use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::os::raw::{c_char, c_int, c_uchar};
 use std::ptr::{null, null_mut};
 use std::str;
 use std::sync::{Arc, Mutex};
+use tera::Tera;
 use toml;
 
 use url;
@@ -35,6 +38,7 @@ struct YNote {
     dbpath: String,
     confpath: String,
     addr: SocketAddr,
+    tera: tera::Tera,
 }
 
 impl Default for YNote {
@@ -44,6 +48,7 @@ impl Default for YNote {
             dbpath: "./main.db".to_owned(),
             confpath: "".to_owned(),
             addr: "127.0.0.1:3000".parse().unwrap(),
+            tera: Tera::new("templates/tera/*.html").unwrap(),
         }
     }
 }
@@ -51,28 +56,36 @@ impl Default for YNote {
 unsafe impl<T> Send for SendPtr<T> {}
 unsafe impl<T> Sync for SendPtr<T> {}
 
+#[derive(Debug)]
 enum BstringKind {
     Owned,
     FromCString,
 }
+
+#[derive(Debug)]
 struct Bstring {
     k: BstringKind,
-    s: bstring,
+    s: Box<tagbstring>,
 }
 impl Drop for Bstring {
     fn drop(&mut self) {
         println!("bstirng dropped");
         match &self.k {
             BstringKind::Owned => unsafe {
-                bdestroy(self.s);
+                bdestroy(self.s.as_mut());
             },
             BstringKind::FromCString => unsafe {
-                if !std::ptr::eq(self.s, null()) && !std::ptr::eq((*self.s).data, null()) {
+                if !std::ptr::eq(self.s.as_mut(), null()) && !std::ptr::eq((*self.s).data, null()) {
                     let _ = CString::from_raw((*self.s).data.cast());
-                    let _ = Box::from_raw(self.s);
                 }
             },
         }
+    }
+}
+
+impl AsMut<tagbstring> for Bstring {
+    fn as_mut(&mut self) -> &mut tagbstring {
+        self.s.as_mut()
     }
 }
 
@@ -92,32 +105,33 @@ impl From<String> for Bstring {
             assert!(!std::ptr::eq(tb.data, null()));
             Bstring {
                 k: BstringKind::FromCString,
-                s: Box::into_raw(tb),
+                s: tb,
             }
         }
     }
 }
 
-impl TryInto<Bytes> for Bstring {
-    type Error = ();
-    fn try_into(self) -> Result<Bytes, Self::Error> {
-        if std::ptr::eq(self.s, null()) {
-            return Err(());
-        }
-
-        unsafe {
-            if std::ptr::eq((*self.s).data, null()) {
-                return Err(());
-            }
-            let ret = Ok(Bytes::from(
-                CStr::from_ptr((*self.s).data.cast()).to_bytes(),
-            ));
-            (*self.s).data = null_mut();
-            bdestroy(self.s);
-            ret
-        }
-    }
-}
+// Check before uncommenting
+//impl TryInto<Bytes> for Bstring {
+//    type Error = ();
+//    fn try_into(self) -> Result<Bytes, Self::Error> {
+//        if std::ptr::eq(self.s, null()) {
+//            return Err(());
+//        }
+//
+//        unsafe {
+//            if std::ptr::eq((*self.s).data, null()) {
+//                return Err(());
+//            }
+//            let ret = Ok(Bytes::from(
+//                CStr::from_ptr((*self.s).data.cast()).to_bytes(),
+//            ));
+//            (*self.s).data = null_mut();
+//            bdestroy(self.s);
+//            ret
+//        }
+//    }
+//}
 
 #[derive(Serialize, Deserialize)]
 struct CreateSnippet {
@@ -184,6 +198,67 @@ fn btfromcstr(s: *mut c_uchar) -> tagbstring {
     }
 }
 
+async fn upload_file_handler(
+    req: Request<Body>,
+    app: Arc<YNote>,
+) -> Result<Response<Body>, hyper::Error> {
+    let mut response = Response::new(Body::empty());
+    Ok(response)
+}
+async fn upload_files_handler(
+    req: Request<Body>,
+    app: Arc<YNote>,
+) -> Result<Response<Body>, hyper::Error> {
+    // TODO:
+    // https://github.com/rousan/multer-rs
+    let mut response = Response::new(Body::empty());
+    let boundary = req
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|ct| ct.to_str().ok())
+        .and_then(|ct| multer::parse_boundary(ct).ok());
+
+    // Send `BAD_REQUEST` status if the content-type is not multipart/form-data.
+    if boundary.is_none() {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(
+                r#"{"status": "error", "msg": "boundary is missing"}"#,
+            ))
+            .unwrap());
+    }
+    let mut multipart = Multipart::new(req.into_body(), boundary.unwrap());
+
+    // Iterate over the fields, `next_field` method will return the next field if
+    // available.
+    while let Some(mut field) = multipart.next_field().await.unwrap() {
+        // Get the field name.
+        let name = field.name();
+
+        // Get the field's filename if provided in "Content-Disposition" header.
+        let file_name = field.file_name();
+
+        // Get the "Content-Type" header as `mime::Mime` type.
+        let content_type = field.content_type();
+
+        println!(
+            "Name: {:?}, FileName: {:?}, Content-Type: {:?}",
+            name, file_name, content_type
+        );
+
+        // Process the field data chunks e.g. store them in a file.
+        let mut field_bytes_len = 0;
+        while let Some(field_chunk) = field.chunk().await.unwrap() {
+            // Do something with field chunk.
+            field_bytes_len += field_chunk.len();
+            field_chunk.w
+        }
+
+        println!("Field Bytes Length: {:?}", field_bytes_len);
+    }
+    Ok(response)
+}
+
 async fn find_snippets_handler(
     req: Request<Body>,
     app: Arc<YNote>,
@@ -217,58 +292,32 @@ async fn find_snippets_handler(
     unsafe {
         let mut err: DBWError = 0;
 
-        let title: Option<tagbstring> = match title {
-            Some(title) => {
-                let len = title.len().try_into().unwrap_or(i32::MAX);
-                Some(blk2tbstr(
-                    CString::from_vec_unchecked(title.into_bytes()).into_raw() as *mut u8,
-                    len,
-                ))
-            }
-            None => None,
-        };
-        let tags: Option<tagbstring> = match tags {
-            Some(tags) => {
-                let len = tags.len().try_into().unwrap_or(i32::MAX);
-                Some(blk2tbstr(
-                    CString::from_vec_unchecked(tags.into_bytes()).into_raw() as *mut u8,
-                    len,
-                ))
-            }
-            None => None,
-        };
-        let r#type: Option<tagbstring> = match r#type {
-            Some(r#type) => {
-                let len = r#type.len().try_into().unwrap_or(i32::MAX);
-                Some(blk2tbstr(
-                    CString::from_vec_unchecked(r#type.into_bytes()).into_raw() as *mut u8,
-                    len,
-                ))
-            }
-            None => None,
-        };
+        let mut title: Option<Bstring> = title.map(String::into);
+        let mut tags: Option<Bstring> = tags.map(String::into);
+        let mut r#type: Option<Bstring> = r#type.map(String::into);
+
+        println!("{:?}, {:?}, {:?}", title, tags, r#type);
+        println!("ok");
 
         let answer = json_api_find_snippets(
             app.dbh.0,
-            match title {
-                Some(mut title) => &mut title,
+            match &mut title {
+                Some(title) => (title).as_mut(),
+
                 None => null_mut(),
             },
-            match r#type {
-                Some(mut r#type) => &mut r#type,
+            match &mut r#type {
+                Some(r#type) => (r#type).as_mut(),
+
                 None => null_mut(),
             },
-            match tags {
-                Some(mut tags) => &mut tags,
+            match &mut tags {
+                Some(tags) => (tags).as_mut(),
                 None => null_mut(),
             },
             &mut err,
         );
-
-        // free allocated CStrings
-        let _ = title.map(|x| CString::from_raw(x.data.cast()));
-        let _ = tags.map(|x| CString::from_raw(x.data.cast()));
-        let _ = r#type.map(|x| CString::from_raw(x.data.cast()));
+        println!("ok2");
 
         *response.body_mut() = Body::from(
             CStr::from_ptr((*answer).data.cast())
@@ -318,7 +367,7 @@ async fn get_snippet_handler(
 ) -> Result<Response<Body>, hyper::Error> {
     let mut response = Response::new(Body::empty());
     let mut err: DBWError = 0;
-    let mut params: Vec<(Cow<str>, Cow<str>)> =
+    let params: Vec<(Cow<str>, Cow<str>)> =
         url::form_urlencoded::parse(&req.uri().query().unwrap_or_default().as_bytes()).collect();
     //   let params = &req.uri().query();
     // let params = url::Url::parse(&req.uri().to_string()).unwrap().query_pairs();
@@ -377,6 +426,9 @@ async fn handler(req: Request<Body>, app: Arc<YNote>) -> Result<Response<Body>, 
         (&Method::GET, "/api/find_snippets") => {
             return find_snippets_handler(req, app).await;
         }
+        (&Method::POST, "/api/upload") => {
+            return upload_file_handler(req, app).await;
+        }
         _ => {
             *response.body_mut() = Body::from(r#"{"status": "ok"}"#);
         }
@@ -392,6 +444,13 @@ fn use_counter(counter: Arc<Mutex<u64>>) -> Response<Body> {
 
 impl YNote {
     fn new() -> YNote {
+        let mut opts = args();
+        while let Some(opt) = opts.next() {
+            if opt == "-c" {
+                let path = opts.next().expect("-c require argument");
+                self.confpath = path;
+            }
+        }
         YNote {
             ..Default::default()
         }
@@ -420,13 +479,6 @@ impl YNote {
             .to_owned()
     }
     fn parse_cli_options(self: &mut YNote) {
-        let mut opts = args();
-        while let Some(opt) = opts.next() {
-            if opt == "-c" {
-                let path = opts.next().expect("-c require argument");
-                self.confpath = path;
-            }
-        }
     }
 }
 
@@ -435,10 +487,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = YNote::new();
     app.parse_cli_options();
     app.read_config();
+    let tera = match Tera::new("templates/tera/*.html") {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Parsing error(s): {}", e);
+            ::std::process::exit(1);
+        }
+    };
     let app = Arc::new(YNote {
         dbh: unsafe {
-            let path: Bstring = app.dbpath.to_owned().into();
-            let h = dbw_connect(DBWDBType_DBW_SQLITE3, path.s, null_mut());
+            let mut path: Bstring = app.dbpath.to_owned().into();
+            let h = dbw_connect(DBWDBType_DBW_SQLITE3, path.as_mut(), null_mut());
             assert!(!std::ptr::eq(h, null()));
             SendPtr(h)
         },

@@ -13,3 +13,6 @@
 [submodule "contrib/md4c"]
 	path = contrib/md4c
 	url = https://github.com/mity/md4c.git
+[submodule "contrib/tomlc99"]
+	path = contrib/tomlc99
+	url = https://github.com/cktan/tomlc99
