@@ -12,35 +12,56 @@ static const struct tagbstring status_ok = bsStatic("{\"status\": \"ok\"}");
 static const struct tagbstring status_method_not_allowed =
     bsStatic("{\"status\": \"error\", \"msg\": \"method not allowed\"}");
 
+static const struct tagbstring status_wrong_path =
+    bsStatic("{\"status\": \"error\", \"msg\": \"wrong path\"}");
+
+static const struct tagbstring status_couldnt_open =
+    bsStatic("{\"status\": \"error\", \"msg\": \"couldn't open file\"}");
+
+static const struct tagbstring status_couldnt_stat =
+    bsStatic("{\"status\": \"error\", \"msg\": \"couldn't stat file\"}");
+
+static const struct tagbstring status_wrong_file_type =
+    bsStatic("{\"status\": \"error\", \"msg\": \"wrong file typ\"}");
+
 static const struct tagbstring status_server_error =
     bsStatic("{\"status\": \"error\", \"msg\": \"server error\"}");
+
+static const struct tagbstring status_bad_request =
+    bsStatic("{\"status\": \"error\", \"msg\": \"bad request\"}");
 
 static const struct tagbstring status_id_required =
     bsStatic("{\"status\": \"error\", \"msg\": \"id required\"}");
 
+static const struct tagbstring status_not_found =
+    bsStatic("{\"status\": \"error\", \"msg\": \"not found\"}");
+
+static const struct tagbstring status_not_implemented =
+    bsStatic("{\"status\": \"error\", \"msg\": \"not implemented\"}");
+
 static const struct tagbstring status_snippet_not_found =
     bsStatic("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
 
-#define JSON_GET_ITEM(json, obj, index)                        \
-  do {                                                         \
-                                                               \
-    json_value *ret = NULL;                                    \
-    if ((json) == NULL) {                                      \
-      obj = NULL;                                              \
-      break;                                                   \
-    }                                                          \
-    if (json->type != json_object) {                           \
-      obj = NULL;                                              \
-      break;                                                   \
-    }                                                          \
-                                                               \
-    for (unsigned int i = 0; i < json->u.object.length; ++i) { \
-      if (!strcmp(json->u.object.values[i].name, index)) {     \
-        ret = (json->u).object.values[i].value;                \
-        break;                                                 \
-      }                                                        \
-    }                                                          \
-    obj = ret;                                                 \
+#define JSON_GET_ITEM(json, obj, index)                                       \
+  do {                                                                        \
+                                                                              \
+    json_value *ret = NULL;                                                   \
+    if ((json) == NULL) {                                                     \
+      obj = NULL;                                                             \
+      break;                                                                  \
+    }                                                                         \
+    if (json->type != json_object) {                                          \
+      obj = NULL;                                                             \
+      break;                                                                  \
+    }                                                                         \
+                                                                              \
+    for (unsigned int i = 0; i < json->u.object.length; ++i) {                \
+      if (!strcmp(json->u.object.values[i].name, index)) {                    \
+        ret = (json->u).object.values[i].value;                               \
+        break;                                                                \
+      }                                                                       \
+    }                                                                         \
+    obj = ret;                                                                \
   } while (0)
 
 typedef enum DBWType {
@@ -136,5 +157,5 @@ bstring json_api_find_snippets(
     bstring tags,
     int *ec);
 
-bstring
-json_api_get_snippet(struct DBWHandler *db_handle, sqlite_int64 id, int render, int *ec);
+bstring json_api_get_snippet(
+    struct DBWHandler *db_handle, sqlite_int64 id, int render, int *ec);

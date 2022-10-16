@@ -31,21 +31,6 @@
     CHECK(bdestroy(question_marks) == BSTR_OK, "Couldn't destroy string"); \
   } while (0)
 
-#define CHECK_JSON_OBJ_PUSH(json, field_name, obj)             \
-  do {                                                         \
-    CHECK(                                                     \
-        json_object_push((json), (field_name), (obj)) != NULL, \
-        "Couldn't create json");                               \
-  } while (0)
-
-#define CHECK_JSON_ARRAY_STR_FIELD_PUSH(str, stmt, field_num, array)        \
-  do {                                                                      \
-    CHECK_MEM(                                                              \
-        (str) = json_string_new(                                            \
-            (json_char *)sqlite3_column_text((stmt), (field_num))));        \
-    CHECK(json_array_push((array), (str)) != NULL, "Couldn't create json"); \
-  } while (0)
-
 #define SNIPPETS_TABLE        "snippets"
 #define SNIPPET_TYPES_TABLE   "snippet_types"
 #define TAGS_TABLE            "tags"
@@ -1100,7 +1085,7 @@ static sqlite3_int64 sqlite3_new_snippet(
   CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
 
   // Step 2: ensure all tags are present in tags table
-  if (tags && rv_len(*tags) > 0) {
+  if (tags != NULL && rv_len(*tags) > 0) {
     struct tagbstring tags_table_name = bsStatic(TAGS_TABLE);
     CHECK(
         sqlite3_ensure_tags(h, &tags_table_name, tags) == DBW_OK,
@@ -1144,7 +1129,7 @@ static sqlite3_int64 sqlite3_new_snippet(
   stmt = NULL;
 
   // Step 4: bind snippet to tags
-  if (rv_len(*tags) > 0) {
+  if (tags != NULL && rv_len(*tags) > 0) {
     struct tagbstring tablename = bsStatic(SNIPPETS_TABLE);
     CHECK(
         sqlite3_bind_tags(h, &tablename, snippet_id, tags) == DBW_OK,
@@ -1584,14 +1569,15 @@ sqlite_int64 dbw_new_snippet(
   CHECK(title != NULL && bdata(title) != NULL, "Null title");
   CHECK(snippet != NULL && bdata(snippet) != NULL, "Null snippet");
   CHECK(type != NULL && bdata(type) != NULL, "Null type");
-  CHECK(tags != NULL, "Null tags");
-  CHECK(
-      rv_len(*tags) >= 0 && rv_len(*tags) < 100,
-      "Too many tags: %zu",
-      rv_len(*tags));
+  if (tags != NULL) {
+    CHECK(
+        rv_len(*tags) >= 0 && rv_len(*tags) < 100,
+        "Too many tags: %zu",
+        rv_len(*tags));
 
-  for (int i = 0; i < rv_len(*tags); i++) {
-    LOG_DEBUG("Got tag %s", bdata(rv_get(*tags, i, NULL)));
+    for (int i = 0; i < rv_len(*tags); i++) {
+      LOG_DEBUG("Got tag %s", bdata(rv_get(*tags, i, NULL)));
+    }
   }
   CHECK(bdata(title)[blength(title)] == '\0', "String must be nul terminated");
   CHECK(

@@ -7,6 +7,7 @@
 #include <event2/event.h>
 #include <event2/http.h>
 #include <event2/keyvalq_struct.h>
+#include <fcntl.h>
 #include <json-builder.h>
 #include <json.h>
 #include <lauxlib.h>
@@ -15,7 +16,10 @@
 #include <rvec.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <toml.h>
+#include <web_static.h>
 
 #ifndef BUF_LEN
 #define BUF_LEN 4096
@@ -28,26 +32,42 @@
 
 #define USAGE "Usage: %s -c|--conf config path\n"
 
-
 static const char *const getUpdatesUrl =
     "https://api.telegram.org/bot%s/getUpdates?timeout=%d&offset=%d";
 
 static const char *const sendMessagelUrl =
     "https://api.telegram.org/bot%s/sendMessage?chat_id=%d&text=%s";
 
-#define MHD_RESPONSE_WITH_BSTRING(connection, status, response, s, ret)  \
-  do {                                                                   \
-    (response) = MHD_create_response_from_buffer_with_free_callback_cls( \
-        blength((s)),                                                    \
-        bdata((s)),                                                      \
-        (MHD_ContentReaderFreeCallback)bdestroy_silent,                  \
-        (s));                                                            \
-    MHD_add_response_header(                                             \
-        response, MHD_HTTP_HEADER_CONTENT_ENCODING, "application/json"); \
-    (ret) = MHD_queue_response((connection), (status), (response));      \
-    MHD_destroy_response((response));                                    \
-    goto exit;                                                           \
-                                                                         \
+#define MHD_RESPONSE_WITH_BSTRING(connection, status, response, s, ret)      \
+  do {                                                                       \
+    MHD_RESPONSE_WITH_BSTRING_CT(                                            \
+        (connection), (status), (response), (s), (ret), "application/json"); \
+  } while (0)
+
+#define MHD_RESPONSE_WITH_BSTRING_CT(connection, status, response, s, ret, ct) \
+  do {                                                                         \
+    (response) = MHD_create_response_from_buffer_with_free_callback_cls(       \
+        blength((s)),                                                          \
+        bdata((s)),                                                            \
+        (MHD_ContentReaderFreeCallback)bdestroy_silent,                        \
+        (s));                                                                  \
+    MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, (ct));     \
+    (ret) = MHD_queue_response((connection), (status), (response));            \
+    MHD_destroy_response((response));                                          \
+    goto exit;                                                                 \
+                                                                               \
+  } while (0)
+
+#define MHD_RESPONSE_REDIRECT(connection, status, s, ret)               \
+  do {                                                                  \
+    (response) =                                                        \
+        MHD_create_response_from_buffer(0, "", MHD_RESPMEM_PERSISTENT); \
+    CHECK(response != NULL, "NULL resp");                               \
+    MHD_add_response_header(response, "Location", bdata(s));            \
+    bdestroy(s);                                                        \
+    (ret) = MHD_queue_response((connection), (status), (response));     \
+    MHD_destroy_response((response));                                   \
+    goto exit;                                                          \
   } while (0)
 
 #define MHD_RESPONSE_WITH_TAGBSTRING(connection, status, response, s, ret) \
@@ -55,7 +75,7 @@ static const char *const sendMessagelUrl =
     (response) = MHD_create_response_from_buffer(                          \
         blength(&(s)), bdata(&(s)), MHD_RESPMEM_PERSISTENT);               \
     MHD_add_response_header(                                               \
-        response, MHD_HTTP_HEADER_CONTENT_ENCODING, "application/json");   \
+        response, MHD_HTTP_HEADER_CONTENT_TYPE, "application/json");       \
     (ret) = MHD_queue_response((connection), (status), (response));        \
     MHD_destroy_response((response));                                      \
     goto exit;                                                             \
@@ -87,6 +107,23 @@ static const char *const sendMessagelUrl =
       "Couldn't append to response buffer");                                   \
   goto exit
 
+#define HTML_BFORMATA(B, M, ...)                      \
+  do {                                                \
+    CHECK(                                            \
+        bformata((B), (M), ##__VA_ARGS__) == BSTR_OK, \
+        "Couldn't concat html part");                 \
+  } while (0)
+
+#define HTML_BCATSCTR(B, M)                                            \
+  do {                                                                 \
+    CHECK(bcatcstr((B), (M)) == BSTR_OK, "Couldn't concat html part"); \
+  } while (0)
+
+#define HTML_BCONCAT(B, M)                                            \
+  do {                                                                \
+    CHECK(bconcat((B), (M)) == BSTR_OK, "Couldn't concat html part"); \
+  } while (0)
+
 #define CHECK_ERR(A, M, ...)                                    \
   do {                                                          \
     if (!(A)) {                                                 \
@@ -101,6 +138,12 @@ static const char *const sendMessagelUrl =
   do {                                                       \
     JSON_GET_ITEM((json), (json_t), (i));                    \
     CHECK_ERR((json_t) != NULL && (json_t)->type == (t), M); \
+  } while (0)
+
+#define JSON_GET_ENSURE2(json, json_t, i, t)                      \
+  do {                                                            \
+    JSON_GET_ITEM((json), (json_t), (i));                         \
+    CHECK((json_t) != NULL && (json_t)->type == t, "Wrong json"); \
   } while (0)
 
 #define PARSE_INT(func, num_str, num, rc)        \
@@ -153,6 +196,11 @@ static const char *const sendMessagelUrl =
       goto error;                                \
     }                                            \
   } while (0);
+
+#define strstartswith(haystack, needle) \
+  (!strncmp((haystack), (needle), strlen(needle)))
+
+#define BSS(s) ((struct tagbstring)bsStatic(s))
 
 enum TgState {
   TGS_ROOT,
@@ -227,13 +275,28 @@ enum HTTPReqType {
   TG_SEND_MSG,
 };
 
-enum HTTPServerRestCallName {
+enum HTTPServerCallName {
   RESTAPI_UNKNOWN = 0,
   RESTAPI_CREATE_SNIPPET = 1,
   RESTAPI_GET_SNIPPET,
   RESTAPI_DELETE_SNIPPET,
   RESTAPI_FIND_SNIPPETS,
   RESTAPI_UPLOAD,
+  RESTAPI_STATIC,
+};
+
+enum HTTPAcceptType {
+  HTTP_ACCEPT_APPLICATION_JSON = 0,
+  HTTP_ACCEPT_TEXT_HTML = 1,
+  HTTP_ACCEPT_OTHER = 2,
+};
+
+enum HTTPContentType {
+  HTTP_CONTENT_OTHER = 0,
+  HTTP_CONTENT_MULTIPART_FORM_DATA = 1,
+  HTTP_CONTENT_FORM_URLENCODED = 2,
+  HTTP_CONTENT_APPLICATION_JSON = 3,
+  HTTP_CONTENT_TEXT_PLAIN = 4,
 };
 
 enum HTTPServerMethodName {
@@ -1591,7 +1654,8 @@ static void ev_json_api_create_snippet(
       blength(json_str),
       json_str->mlen);
 
-  response = json_api_create_snippet(app->db_handle, json_str, snippet_id, edit, &rc);
+  response =
+      json_api_create_snippet(app->db_handle, json_str, snippet_id, edit, &rc);
   CHECK(response != NULL, "Couldn't create snippet");
 
   evhttp_add_header(
@@ -1738,45 +1802,119 @@ typedef rvec_t(struct UploadFile) UploadFilesVec;
 
 enum ConnInfoType {
   CIT_POST_RAW,
-  CIT_POST_FORM,
+  CIT_POST_UPLOAD_FORM,
+  CIT_POST_SNIPPET_FORM,
   CIT_OTHER,
 };
 
 struct ConnInfo {
   struct YNoteApp *app;
+  const char *url;
   uint64_t invocations;
   enum ConnInfoType type;
-  enum HTTPServerRestCallName api_call_name;
+  enum HTTPServerCallName api_call_name;
   enum HTTPServerMethodName method_name;
+  enum HTTPAcceptType at;
+  enum HTTPContentType ct;
   void *userp;
   struct MHD_PostProcessor *pp;
   struct tagbstring error;
 };
 
+static void ConnInfo_destroy(struct ConnInfo *ci);
+
 static struct ConnInfo *ConnInfo_create(
     enum ConnInfoType ct,
     enum HTTPServerMethodName method_name,
-    enum HTTPServerRestCallName api_call_name,
+    enum HTTPServerCallName call_name,
+    struct MHD_Connection *connection,
+    const char *url,
     struct YNoteApp *app) {
+  const char *header_str = NULL;
+  bstrListEmb *split_header_line = NULL;
   struct ConnInfo *ci = calloc(1, sizeof(struct ConnInfo));
   CHECK_MEM(ci);
+  ci->app = app;
+
+  ci->api_call_name = call_name;
+  ci->method_name = method_name;
+
+  ci->type = ct;
+  ci->url = url;
+
+  header_str =
+      MHD_lookup_connection_value(connection, MHD_HEADER_KIND, "Accept");
+  LOG_DEBUG("header str %s", header_str);
+  if (header_str != NULL) {
+    CHECK(
+        (split_header_line = bcstrsplit_noalloc(header_str, ',')) != NULL,
+        "Couldn't split line");
+    if (split_header_line->n > 0 && !strncmp(
+                                        bdata(&split_header_line->a[0]),
+                                        "text/html",
+                                        strlen("text/html"))) {
+      ci->at = HTTP_ACCEPT_TEXT_HTML;
+    }
+    bstrListEmb_destroy(split_header_line);
+    split_header_line = NULL;
+  }
+  header_str =
+      MHD_lookup_connection_value(connection, MHD_HEADER_KIND, "Content-Type");
+  if (header_str != NULL) {
+    CHECK(
+        (split_header_line = bcstrsplit_noalloc(header_str, ';')) != NULL,
+        "Couldn't split line");
+    if (split_header_line->n > 0) {
+      if (strstartswith(
+              bdata(&split_header_line->a[0]), "multipart/form-data")) {
+        ci->ct = HTTP_CONTENT_MULTIPART_FORM_DATA;
+      } else if (strstartswith(
+                     bdata(&split_header_line->a[0]),
+                     "application/x-www-form-urlencoded")) {
+        ci->ct = HTTP_CONTENT_FORM_URLENCODED;
+      } else if (strstartswith(
+                     bdata(&split_header_line->a[0]), "application/json")) {
+        ci->ct = HTTP_CONTENT_APPLICATION_JSON;
+
+      } else if (strstartswith(bdata(&split_header_line->a[0]), "text/plain")) {
+        ci->ct = HTTP_CONTENT_TEXT_PLAIN;
+      }
+    }
+    bstrListEmb_destroy(split_header_line);
+    split_header_line = NULL;
+  }
+  if (method_name == RESTMETHOD_POST) {
+    if (call_name == RESTAPI_UPLOAD) {
+      ct = CIT_POST_UPLOAD_FORM;
+    } else if (
+        call_name == RESTAPI_CREATE_SNIPPET &&
+        ct == HTTP_CONTENT_MULTIPART_FORM_DATA) {
+      ct = CIT_POST_SNIPPET_FORM;
+    } else {
+      ct = CIT_POST_RAW;
+    }
+  } else {
+    ct = CIT_OTHER;
+  }
   if (ct == CIT_POST_RAW) {
     CHECK((ci->userp = bfromcstr("")) != NULL, "Couldn't create con_cls");
-  } else if (ct == CIT_POST_FORM) {
+  } else if (ct == CIT_POST_UPLOAD_FORM) {
     CHECK(
         (ci->userp = calloc(1, sizeof(UploadFilesVec))) != NULL,
         "Couldn't create con_cls");
   }
-  ci->app = app;
 
-  ci->api_call_name = api_call_name;
-  ci->method_name = method_name;
-
-  ci->type = ct;
-
+exit:
+  if (split_header_line != NULL) {
+    bstrListEmb_destroy(split_header_line);
+  }
   return ci;
 error:
-  return NULL;
+  if (ci != NULL) {
+    ConnInfo_destroy(ci);
+    ci = NULL;
+  }
+  goto exit;
 }
 
 static void ConnInfo_destroy(struct ConnInfo *ci) {
@@ -1784,7 +1922,7 @@ static void ConnInfo_destroy(struct ConnInfo *ci) {
     if (ci->userp != NULL) {
       if (ci->type == CIT_POST_RAW) {
         bdestroy((bstring)(ci->userp));
-      } else if (ci->type == CIT_POST_FORM) {
+      } else if (ci->type == CIT_POST_UPLOAD_FORM) {
         UploadFilesVec *v = ci->userp;
         for (size_t i = 0; i < v->n; i++) {
           struct UploadFile *uf = NULL;
@@ -1827,6 +1965,19 @@ static void request_completed(
 typedef enum MHD_Result (*MHDPageHandler)(
     const void *cls, struct MHD_Connection *connection);
 
+static enum MHD_Result post_snippet_iterator(
+    void *cls,
+    enum MHD_ValueKind kind,
+    const char *key,
+    const char *filename,
+    const char *content_type,
+    const char *transfer_encoding,
+    const char *data,
+    uint64_t off,
+    size_t size) {
+  int ret = MHD_YES;
+  return ret;
+}
 static enum MHD_Result post_upload_iterator(
     void *cls,
     enum MHD_ValueKind kind,
@@ -1936,33 +2087,256 @@ error:
   goto exit;
 }
 
-static enum MHD_Result post_iterator(
-    void *cls,
-    enum MHD_ValueKind kind,
-    const char *key,
-    const char *filename,
-    const char *content_type,
-    const char *transfer_encoding,
-    const char *data,
-    uint64_t off,
-    size_t size) {
-  (void)kind;
-  (void)*key;
-  (void)*filename;
-  (void)*content_type;
-  (void)*transfer_encoding;
-  LOG_DEBUG("name %s", key);
-  LOG_DEBUG("data %s", data);
-  LOG_DEBUG("filename %s", filename);
-  LOG_DEBUG("cotent_type %s", content_type);
-  LOG_DEBUG("transfer_encoding %s", transfer_encoding);
-  LOG_DEBUG("kind %u", kind);
-  LOG_DEBUG("offset %lu", off);
-  LOG_DEBUG("size %zu", size);
-  bstring str = cls;
-  bcatblk(str, &data[off], size);
+static enum MHD_Result post_create_snippet_from_multipart_response(
+    struct MHD_Connection *connection, struct ConnInfo *ci) {
+  struct MHD_Response *response = NULL;
+  int ret = MHD_NO;
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_NOT_IMPLEMENTED,
+      response,
+      status_not_implemented,
+      ret);
+exit:
+  return ret;
+}
 
-  return MHD_YES;
+struct BPair {
+  struct tagbstring k;
+  struct tagbstring v;
+};
+
+typedef rvec_t(struct BPair) BPairs;
+
+void BPairs_destroy(BPairs *bp) {
+  if (bp != NULL) {
+    rv_destroy(*bp);
+    free(bp);
+  }
+}
+
+static BPairs *bsplittopairs_noalloc(bstring s) {
+  BPairs *ret = NULL;
+  bstrListEmb *strsplit = NULL;
+  int err = RV_ERR_OK;
+
+  CHECK(s != NULL, "NULL string");
+
+  ret = calloc(1, sizeof(BPairs));
+  CHECK_MEM(ret);
+
+  strsplit = bsplit_noalloc(s, '\n');
+  CHECK(strsplit != NULL, "Couldn't split string");
+  for (int i = 0; i < strsplit->n; i++) {
+    struct BPair pair = {0};
+    struct tagbstring k = {0};
+    struct tagbstring v = {0};
+    int delim_pos = 0;
+    if (blength(&strsplit->a[i]) < 1) {
+      continue;
+    }
+    delim_pos = binchr(&strsplit->a[i], 1, &(struct tagbstring)bsStatic("="));
+    if (delim_pos != BSTR_ERR) {
+      bmid2tbstr(k, &strsplit->a[i], 0, delim_pos);
+      bmid2tbstr(v, &strsplit->a[i], delim_pos + 1, blength(&strsplit->a[i]));
+      if (blength(&k) > 0) {
+        CHECK(tbtrimws(&k) == BSTR_OK, "Couldn't trim string");
+      }
+      if (blength(&v) > 0) {
+        CHECK(tbtrimws(&v) == BSTR_OK, "Couldn't trim string");
+      }
+      pair.k = k;
+      pair.v = v;
+      rv_push(*ret, pair, &err);
+      CHECK(err == RV_ERR_OK, "Couldn't push value to vec");
+    }
+  }
+
+exit:
+  if (strsplit != NULL) {
+    bstrListEmb_destroy(strsplit);
+  }
+  return ret;
+error:
+  if (ret != NULL) {
+    rv_destroy(*ret);
+    free(ret);
+  }
+  ret = NULL;
+  goto exit;
+}
+
+static bstring BPairs_get(BPairs *bp, bstring key) {
+  CHECK(key != NULL, "Null key");
+  CHECK(bp != NULL, "Null bp");
+
+  for (size_t i = 0; i < bp->n; i++) {
+    if (!bstrcmp(&bp->a[i].k, key)) {
+      return &bp->a[i].v;
+    }
+  }
+error:
+  return NULL;
+}
+
+static bstring BPairs_get_copy(BPairs *bp, bstring key, int *err) {
+  bstring ret = NULL;
+  ret = BPairs_get(bp, key);
+  if (ret != NULL) {
+    ret = bstrcpy(ret);
+    CHECK_MEM(ret);
+  }
+error:
+  if (ret != NULL) {
+    bdestroy(ret);
+  }
+  return NULL;
+}
+
+static enum MHD_Result post_create_snippet_from_raw_response(
+    struct MHD_Connection *connection,
+    struct ConnInfo *ci,
+    int edit,
+    sqlite_int64 id) {
+  struct MHD_Response *response = NULL;
+  int ret = MHD_NO;
+  const int border_len = 4;
+
+  bstring tags = NULL;
+  bstring title = NULL;
+  bstring type = NULL;
+
+  bstrListEmb *tagslist = NULL;
+
+  BPairs *bp = NULL;
+
+  struct tagbstring toml = {0};
+  int err = 0;
+
+  bstring json_str_res = NULL;
+
+  CHECK(
+      bfindreplace(
+          ci->userp,
+          &(struct tagbstring)bsStatic("\r\n"),
+          &(struct tagbstring)bsStatic("\n"),
+          0) == BSTR_OK,
+      "Couldn't replace string");
+
+  struct tagbstring body = *((bstring)ci->userp);
+  CHECK(strstartswith(bdata(&body), "content="), "Wrong form");
+  bmid2tbstr(body, &body, strlen("content="), blength(&body));
+
+  if (strstartswith(bdata(&body), "+++\n")) {
+    int toml_end = border_len;
+    toml_end = binstr(&body, border_len, &(struct tagbstring)bsStatic("+++\n"));
+    if (toml_end != BSTR_ERR && toml_end > border_len) {
+      bmid2tbstr(toml, &body, border_len, toml_end - border_len);
+      LOG_DEBUG(
+          "toml to parse is %s, toml_end %d, border_len %d",
+          bdata(&toml),
+          toml_end,
+          border_len);
+      bp = bsplittopairs_noalloc(&toml);
+      bmid2tbstr(body, &body, toml_end + border_len, blength(&body));
+
+#define _BP_GET_ENSURE(k)         \
+  (k) = BPairs_get(bp, &BSS(#k)); \
+  if ((k) != NULL) {              \
+    (k) = bstrcpy(k);             \
+    CHECK_MEM(k);                 \
+  }
+
+      _BP_GET_ENSURE(title);
+      _BP_GET_ENSURE(tags);
+      _BP_GET_ENSURE(type);
+
+#undef _BP_GET_ENSURE
+
+      if (title == NULL || type == NULL) {
+        goto response_403;
+      }
+
+      if (tags != NULL) {
+        tagslist = bsplit_noalloc(tags, ',');
+        CHECK(tagslist != NULL, "Couldn't split tags");
+      }
+
+      if (edit) {
+        id = dbw_edit_snippet(
+            ci->app->db_handle, id, title, &body, type, tagslist, 0, &err);
+      } else {
+        id = dbw_new_snippet(
+            ci->app->db_handle, title, &body, type, tagslist, &err);
+      }
+      if (err == DBW_ERR_NOT_FOUND) {
+        MHD_RESPONSE_WITH_TAGBSTRING(
+            connection, MHD_HTTP_NOT_FOUND, response, status_not_found, ret);
+      } else {
+        CHECK(err == DBW_OK, "Couldn't create or edit snippet");
+      }
+      bstring redirect = bformat("/api/get_snippet?id=%lld", id);
+      CHECK(bdata(redirect) != NULL, "Couldn't create redirect location");
+      MHD_RESPONSE_REDIRECT(connection, MHD_HTTP_FOUND, redirect, ret);
+    }
+  } else {
+    // if header is missing
+    goto response_403;
+  }
+  LOG_DEBUG("got here");
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_NOT_IMPLEMENTED,
+      response,
+      status_not_implemented,
+      ret);
+response_403:
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection, MHD_HTTP_BAD_REQUEST, response, status_bad_request, ret);
+response_500:
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_INTERNAL_SERVER_ERROR,
+      response,
+      status_server_error,
+      ret);
+exit:
+  if (bp != NULL) {
+    BPairs_destroy(bp);
+  }
+  if (tagslist != NULL) {
+    bstrListEmb_destroy(tagslist);
+  }
+  return ret;
+error:
+  if (json_str_res != NULL) {
+    bdestroy(json_str_res);
+  }
+  goto response_500;
+}
+
+static enum MHD_Result post_create_snippet_from_json_response(
+    struct MHD_Connection *connection,
+    struct ConnInfo *ci,
+    int edit,
+    sqlite_int64 snippet_id) {
+  const char *edit_str = NULL;
+  struct MHD_Response *response = NULL;
+  bstring body = (bstring)ci->userp;
+  bstring json_str_res = NULL;
+  int rc = 0;
+  int ret = MHD_NO;
+
+  json_str_res =
+      json_api_create_snippet(ci->app->db_handle, body, snippet_id, edit, &rc);
+  if (json_str_res == NULL) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, rc, response, status_server_error, ret);
+  } else {
+    MHD_RESPONSE_WITH_BSTRING(connection, rc, response, json_str_res, ret);
+  }
+exit:
+  return ret;
 }
 
 static enum MHD_Result
@@ -2155,19 +2529,14 @@ static enum MHD_Result mhd_api_create_snippet(
     const char *upload_data,
     size_t *upload_data_size) {
   struct MHD_Response *response = NULL;
+  bstrListEmb *split_header_line = NULL;
   int ret = MHD_NO;
-  int edit = 0;
   int rc = 0;
+  int multipart = 0;
   const char *edit_str = NULL;
+  const char *header_str = NULL;
   bstring body = (bstring)ci->userp;
-  bstring json_str_res = NULL;
 
-  edit_str =
-      MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "edit");
-
-  if (edit_str != NULL && biseqcstrcaseless(&s_true, edit_str)) {
-    edit = 1;
-  }
   if (ci->method_name != RESTMETHOD_POST) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection,
@@ -2177,17 +2546,58 @@ static enum MHD_Result mhd_api_create_snippet(
         ret);
   }
   if (ci->invocations == 1) {
+    if (ci->ct == HTTP_CONTENT_MULTIPART_FORM_DATA ||
+        ci->ct == HTTP_CONTENT_FORM_URLENCODED) {
+      CHECK(ci->pp == NULL, "Post process must be null on first invocation");
+      ci->pp = MHD_create_post_processor(
+          connection, 1024, post_snippet_iterator, ci);
+      CHECK(ci->pp != NULL, "Couldn't create post processor");
+    }
     ret = MHD_YES;
     goto exit;
   }
+
   if (*upload_data_size != 0) {
-    CHECK(
-        bcatblk(body, upload_data, *upload_data_size) == BSTR_OK,
-        "Couldn't read body");
-    *upload_data_size = 0;
-    ret = MHD_YES;
-    goto exit;
+    if (blength(&ci->error) > 0) {
+      // skip data if we have error
+      *upload_data_size = 0;
+      ret = MHD_YES;
+      goto exit;
+    }
+    if (ci->ct == HTTP_CONTENT_MULTIPART_FORM_DATA ||
+        ci->ct == HTTP_CONTENT_FORM_URLENCODED) {
+      CHECK(
+          MHD_post_process(ci->pp, upload_data, *upload_data_size) == MHD_YES,
+          "Could't post_process");
+      *upload_data_size = 0;
+      ret = MHD_YES;
+      goto exit;
+    } else {
+      if (bcatblk(body, upload_data, *upload_data_size) != BSTR_OK) {
+        LOG_ERR("Couldn't read body");
+        ci->error = status_server_error;
+        *upload_data_size = 0;
+        ret = MHD_YES;
+        goto exit;
+      }
+      *upload_data_size = 0;
+      ret = MHD_YES;
+      goto exit;
+    }
   } else {
+    if (blength(&ci->error) > 0) {
+      MHD_RESPONSE_WITH_TAGBSTRING(
+          connection, MHD_HTTP_BAD_REQUEST, response, ci->error, ret);
+    }
+
+    int edit = 0;
+    const char *edit_str = NULL;
+    edit_str =
+        MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "edit");
+
+    if (edit_str != NULL && biseqcstrcaseless(&s_true, edit_str)) {
+      edit = 1;
+    }
     sqlite_int64 snippet_id = 0;
     if (edit) {
       const char *value =
@@ -2210,20 +2620,27 @@ static enum MHD_Result mhd_api_create_snippet(
             ret);
       }
     }
-    json_str_res = json_api_create_snippet(
-        ci->app->db_handle, body, snippet_id, edit, &rc);
-    if (json_str_res == NULL) {
-      MHD_RESPONSE_WITH_TAGBSTRING(
-          connection, rc, response, status_server_error, ret);
+    if (ci->ct == HTTP_CONTENT_MULTIPART_FORM_DATA) {
+      ret = post_create_snippet_from_multipart_response(connection, ci);
+      goto exit;
+    } else if (ci->ct == HTTP_CONTENT_APPLICATION_JSON) {
+      ret = post_create_snippet_from_json_response(
+          connection, ci, edit, snippet_id);
+      goto exit;
     } else {
-      MHD_RESPONSE_WITH_BSTRING(connection, rc, response, json_str_res, ret);
+      ret = post_create_snippet_from_raw_response(
+          connection, ci, edit, snippet_id);
+      goto exit;
     }
-  exit:
-    return ret;
-  error:
-    ret = MHD_NO;
-    goto exit;
   }
+exit:
+  if (split_header_line != NULL) {
+    bstrListEmb_destroy(split_header_line);
+  }
+  return ret;
+error:
+  ret = MHD_NO;
+  goto exit;
 }
 
 static enum MHD_Result
@@ -2272,22 +2689,178 @@ error:
   goto exit;
 }
 
+// Consumes json
+static bstring json_snippet_to_html(bstring json, int edit) {
+  bstring ret = NULL;
+  json_value *parsed_snippet = NULL;
+  json_value *json_result = NULL;
+  json_value *json_tmp = NULL;
+  json_value *json_id = NULL;
+
+  CHECK(bdata(json) != NULL, "NULL json");
+
+  ret = bfromcstr("");
+  CHECK(ret != NULL, "Couldn't create string");
+
+  parsed_snippet = json_parse(bdata(json), blength(json));
+  CHECK(parsed_snippet != NULL, "Couldn't parse json");
+
+  CHECK(
+      parsed_snippet->type == json_object,
+      "Wrong json %d",
+      parsed_snippet->type);
+
+  JSON_GET_ENSURE2(parsed_snippet, json_result, "result", json_object);
+  JSON_GET_ENSURE2(json_result, json_tmp, "title", json_string);
+  JSON_GET_ENSURE2(json_result, json_id, "id", json_integer);
+
+  HTML_BCONCAT(ret, (bstring)&web_static_main_header);
+  HTML_BCATSCTR(ret, "<div class=\"main\">");
+  HTML_BFORMATA(ret, "<h1>%s</h1>", json_tmp->u.string.ptr);
+
+  JSON_GET_ENSURE2(json_result, json_tmp, "content", json_string);
+
+  if (edit) {
+    HTML_BFORMATA(
+        ret,
+        "<form accept-charset=\"UTF-8\""
+        " enctype=\"text/plain\""
+        " action=\"/api/create_snippet?edit=true&id=%d\" "
+        " method=\"post\">"
+        "  <textarea "
+        "    class=\"content\""
+        "    cols=\"70\""
+        "    id=\"content\""
+        "    name=\"content\""
+        "    rows=\"30\">"
+        "%s%s",
+        json_id->u.integer,
+        json_tmp->u.string.ptr,
+        "</textarea><br><br><input type=\"submit\" value=\"save\"> "
+        "</form>");
+  } else {
+    HTML_BFORMATA(ret, "%s", json_tmp->u.string.ptr);
+  }
+  HTML_BCATSCTR(ret, "</div>");
+
+  HTML_BCONCAT(ret, (bstring)&web_static_main_footer);
+
+  // fallthrough
+exit:
+  if (json != NULL) {
+    bdestroy(json);
+  }
+  if (parsed_snippet != NULL) {
+    json_value_free(parsed_snippet);
+  }
+
+  return ret;
+error:
+  if (ret != NULL) {
+    bdestroy(ret);
+    ret = NULL;
+  }
+  goto exit;
+}
+
+static enum MHD_Result
+mhd_api_static(struct MHD_Connection *connection, struct ConnInfo *ci) {
+  int ret = MHD_NO;
+  int fd = 0;
+  struct stat filestat;
+  struct MHD_Response *response = NULL;
+  struct tagbstring tburl = {0};
+  struct tagbstring tbpath = {0};
+  bstring path = NULL;
+
+  btfromcstr(tburl, ci->url);
+  if (blength(&tburl) < 1) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+  }
+  if ((!strncmp(bdata(&tburl), "/static/", strlen("/static/")))) {
+    bmid2tbstr(tbpath, &tburl, strlen("/static/"), blength(&tburl));
+  } else {
+    tbpath = tburl;
+  }
+
+  path = bformat("static/www/%s", bdata(&tbpath));
+  if (bdata(path) == NULL) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_INTERNAL_SERVER_ERROR,
+        response,
+        status_server_error,
+        ret);
+  }
+  if (strstr(bdata(path), "..")) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+  }
+
+  LOG_DEBUG("trying to open %s", bdata(path));
+
+  if (stat(bdatae(path, ""), &filestat) != 0) {
+    LOG_ERR("Couldn't stat file %s", bdatae(path, ""));
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, status_couldnt_stat, ret);
+  }
+  if (!S_ISREG(filestat.st_mode)) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        status_wrong_file_type,
+        ret);
+  }
+
+  fd = open(bdata(path), O_RDONLY);
+  if (fd < 0) {
+    errno = 0;
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, status_couldnt_open, ret);
+  }
+
+  (response) = MHD_create_response_from_fd((size_t)filestat.st_size, fd);
+  (ret) = MHD_queue_response(connection, MHD_HTTP_OK, response);
+  MHD_destroy_response((response));
+  goto exit;
+exit:
+  if (path != NULL) {
+    bdestroy(path);
+  }
+  return ret;
+error:
+  ret = MHD_NO;
+  goto exit;
+}
+
 static enum MHD_Result
 mhd_api_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
   struct MHD_Response *response = NULL;
   int ret = MHD_NO;
   sqlite_int64 id = 0;
   int rc = 0;
+  int return_html = 0;
+  const char *header_str = NULL;
   const char *edit_str = NULL;
   char edit = 0;
   int ret_code = 200;
-  bstring json_str_res = NULL;
+  bstring str_res = NULL;
+  bstrListEmb *split_header_line = NULL;
+  json_value *parsed_snippet = NULL;
+  json_value *json_tmp = NULL;
 
   edit_str =
       MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "edit");
   if (edit_str != NULL && biseqcstrcaseless(&s_true, edit_str)) {
     edit = 1;
   }
+
+  if (ci->at == HTTP_ACCEPT_TEXT_HTML) {
+    return_html = 1;
+  }
+  LOG_DEBUG("accept %d", return_html);
   if (ci->method_name != RESTMETHOD_GET) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection,
@@ -2307,19 +2880,36 @@ mhd_api_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, status_id_required, ret);
   }
-  json_str_res = json_api_get_snippet(ci->app->db_handle, id, !edit, &ret_code);
-  LOG_DEBUG("json_str_res is %s", bdata(json_str_res));
-  if (json_str_res == NULL) {
-    MHD_RESPONSE_WITH_TAGBSTRING(
-        connection,
-        MHD_HTTP_INTERNAL_SERVER_ERROR,
-        response,
-        status_server_error,
-        ret);
+  str_res = json_api_get_snippet(ci->app->db_handle, id, !edit, &ret_code);
+  LOG_DEBUG("str_res is %s", bdata(str_res));
+  if (str_res == NULL) {
+    goto response_500;
   }
-  MHD_RESPONSE_WITH_BSTRING(
-      connection, ret_code, response, json_str_res, ret);
+  if (return_html) {
+    str_res = json_snippet_to_html(str_res, edit);
+    if (str_res == NULL) {
+      goto response_500;
+    }
+    MHD_RESPONSE_WITH_BSTRING_CT(
+        connection, ret_code, response, str_res, ret, "text/html");
+  } else {
+    MHD_RESPONSE_WITH_BSTRING(connection, ret_code, response, str_res, ret);
+  }
+
+response_500:
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_INTERNAL_SERVER_ERROR,
+      response,
+      status_server_error,
+      ret);
 exit:
+  if (split_header_line != NULL) {
+    bstrListEmb_destroy(split_header_line);
+  }
+  if (parsed_snippet != NULL) {
+    json_value_free(parsed_snippet);
+  }
   return ret;
 error:
   ret = MHD_NO;
@@ -2328,11 +2918,12 @@ error:
 
 static void mhd_log(void *cls, const char *fm, va_list ap) {
   int ret;
-  bstring b;
+  bstring b = NULL;
 
   (void)cls;
 
   bvalformata(ret, b = bfromcstr(""), fm, ap);
+  LOG_ERR("%s", bdata(b));
 
   if (BSTR_OK == ret) {
     if (bdata(b) != NULL && blength(b) > 0) {
@@ -2359,7 +2950,7 @@ static int mhd_handler(
   struct ConnInfo *ci = NULL;
 
   if (*con_cls == NULL) {
-    enum HTTPServerRestCallName call_name;
+    enum HTTPServerCallName call_name;
     enum HTTPServerMethodName method_name;
 
     if (!strcmp(url, "/api/get_snippet")) {
@@ -2372,6 +2963,8 @@ static int mhd_handler(
       call_name = RESTAPI_DELETE_SNIPPET;
     } else if (!strcmp(url, "/api/upload")) {
       call_name = RESTAPI_UPLOAD;
+    } else if (!strncmp(url, "/static/", strlen("/static/"))) {
+      call_name = RESTAPI_STATIC;
     } else {
       call_name = RESTAPI_UNKNOWN;
     }
@@ -2389,16 +2982,7 @@ static int mhd_handler(
     }
 
     enum ConnInfoType cit = 0;
-    if (method_name == RESTMETHOD_POST) {
-      if (call_name == RESTAPI_UPLOAD) {
-        cit = CIT_POST_FORM;
-      } else {
-        cit = CIT_POST_RAW;
-      }
-    } else {
-      cit = CIT_OTHER;
-    }
-    ci = ConnInfo_create(cit, method_name, call_name, app);
+    ci = ConnInfo_create(cit, method_name, call_name, connection, url, app);
     CHECK(ci != NULL, "Couldn't create con_cls");
     *con_cls = ci;
   }
@@ -2418,6 +3002,9 @@ static int mhd_handler(
     goto exit;
   case RESTAPI_DELETE_SNIPPET:
     ret = mhd_api_delete_snippet(connection, ci);
+    goto exit;
+  case RESTAPI_STATIC:
+    ret = mhd_api_static(connection, ci);
     goto exit;
   case RESTAPI_UPLOAD:
     ret = mhd_api_upload(connection, ci, upload_data, upload_data_size);
