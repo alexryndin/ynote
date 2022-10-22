@@ -15,10 +15,12 @@ CREATE TABLE IF NOT EXISTS snippets (
   title TEXT UNIQUE NOT NULL,
   content TEXT,
   type INTEGER NOT NULL,
+  dir NOT NULL DEFAULT 1,
   created DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated DATETIME DEFAULT CURRENT_TIMESTAMP,
   deleted BOOL DEFAULT FALSE NOT NULL,
-  FOREIGN KEY(type) REFERENCES snippet_types(id)
+  FOREIGN KEY(type) REFERENCES snippet_types(id),
+  FOREIGN KEY(dir) REFERENCES dirs(id)
 );
 
 CREATE TABLE IF NOT EXISTS snippet_to_tags (
@@ -28,6 +30,22 @@ CREATE TABLE IF NOT EXISTS snippet_to_tags (
   FOREIGN KEY(snippet_id) REFERENCES snippets(id),
   FOREIGN KEY(tag_id) REFERENCES tags(id)
   UNIQUE(snippet_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS dirs (
+  id INTEGER NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  created DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dir_to_dirs (
+  id INTEGER NOT NULL PRIMARY KEY,
+  dir_id NOT NULL,
+  child_id NOT NULL,
+  FOREIGN KEY(dir_id) REFERENCES dirs(id),
+  FOREIGN KEY(child_id) REFERENCES dirs(id)
+  UNIQUE(dir_id, child_id)
 );
 
 CREATE TABLE IF NOT EXISTS files (
@@ -74,4 +92,8 @@ INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (1,2);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (2,2);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (4,3);
 
+INSERT INTO dirs(name) VALUES ("root"), ("codes");
+INSERT INTO dir_to_dirs (dir_id, child_id) VALUES (1,2);
+
 COMMIT;
+

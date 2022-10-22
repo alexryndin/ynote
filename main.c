@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <toml.h>
 #include <web_static.h>
 
 #ifndef BUF_LEN
@@ -223,7 +222,7 @@ struct YNoteApp {
   int mhd_port;
   uint updates_offset;
   struct UsersInfo users_info;
-  void *db_handle;
+  DBWHandler *db_handle;
   CURLM *curl_multi;
   bstring tg_token;
   struct event *http_client_timer_event;
@@ -2407,7 +2406,7 @@ exit:
   return ret;
 }
 
-static enum MHD_Result mhd_api_upload(
+static enum MHD_Result mhd_api_handle_upload(
     struct MHD_Connection *connection,
     struct ConnInfo *ci,
     const char *upload_data,
@@ -2464,8 +2463,8 @@ static void mybdestroy(bstring s) {
   bdestroy(s);
 }
 
-static enum MHD_Result
-mhd_api_find_snippets(struct MHD_Connection *connection, struct ConnInfo *ci) {
+static enum MHD_Result mhd_api_handle_find_snippets(
+    struct MHD_Connection *connection, struct ConnInfo *ci) {
   struct MHD_Response *response = NULL;
   int ret = MHD_NO;
   int err = 0;
@@ -2523,7 +2522,7 @@ error:
   goto exit;
 }
 
-static enum MHD_Result mhd_api_create_snippet(
+static enum MHD_Result mhd_api_handle_create_snippet(
     struct MHD_Connection *connection,
     struct ConnInfo *ci,
     const char *upload_data,
@@ -2643,8 +2642,104 @@ error:
   goto exit;
 }
 
+static const struct tagbstring select_snippets_sql = bsStatic(
+    "select snippets.id, snippets.title, substr(snippets.content, 1, 50) as content, group_concat(tags.name, ', ') from "
+    "snippets left "
+    "join snippet_to_tags on snippets.id = snippet_to_tags.snippet_id left "
+    "join tags on snippet_to_tags.tag_id = tags.id group by snippets.id;");
+
 static enum MHD_Result
-mhd_api_delete_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
+mhd_handle_index(struct MHD_Connection *connection, struct ConnInfo *ci) {
+
+  struct MHD_Response *response = NULL;
+  sqlite3_stmt *stmt = NULL;
+  bstring response_string = NULL;
+
+  int err = 0;
+  int ret = MHD_NO;
+
+  if (ci->method_name != RESTMETHOD_GET) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        status_method_not_allowed,
+        ret);
+  }
+
+  response_string = bfromcstr("");
+  CHECK(response_string != NULL, "Couldn't create string");
+  HTML_BCONCAT(response_string, (bstring)&web_static_main_header);
+
+  CHECK(
+      sqlite3_prepare_v2(
+          ci->app->db_handle->conn,
+          bdata(&select_snippets_sql),
+          blength(&select_snippets_sql) + 1,
+          &stmt,
+          NULL) == SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(ci->app->db_handle->conn));
+
+  CHECK(
+      (err = sqlite3_step(stmt), err == SQLITE_DONE || err == SQLITE_ROW),
+      "Couldn't select snippets");
+
+  HTML_BCATSCTR(
+      response_string,
+      "<div class=\"main\"> "
+      "<p class=\"item-list\"> ");
+  if (err == SQLITE_ROW) {
+    do {
+      HTML_BFORMATA(
+          response_string,
+          "<a rel=\"noopener noreferrer\" "
+          "href=\"//localhost:8083/api/get_snippet?id=%lld\" "
+          "class=\"list-item\"> ID:%lld <span class=\"muted\">[</span><span "
+          "class=\"identifier\">%s</span><span class=\"muted\">]</span> %s </a><br>",
+          sqlite3_column_int64(stmt, 0),
+          sqlite3_column_int64(stmt, 0),
+          sqlite3_column_text(stmt, 1),
+          sqlite3_column_text(stmt, 2));
+
+    } while (err = sqlite3_step(stmt), err == SQLITE_ROW);
+  }
+
+  HTML_BCATSCTR(
+      response_string,
+      "</div> "
+      "</p> ");
+
+  CHECK(
+      err == SQLITE_DONE,
+      "DB error: %s",
+      sqlite3_errmsg(ci->app->db_handle->conn));
+  sqlite3_finalize(stmt);
+  stmt = NULL;
+  HTML_BCONCAT(response_string, (bstring)&web_static_main_footer);
+
+  MHD_RESPONSE_WITH_BSTRING_CT(
+      connection, MHD_HTTP_OK, response, response_string, ret, "text/html");
+
+exit:
+  if (stmt != NULL) {
+    sqlite3_finalize(stmt);
+  }
+  return ret;
+error:
+  if (response_string != NULL) {
+    bdestroy(response_string);
+  }
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_INTERNAL_SERVER_ERROR,
+      response,
+      status_server_error,
+      ret);
+}
+
+static enum MHD_Result mhd_api_handle_delete_snippet(
+    struct MHD_Connection *connection, struct ConnInfo *ci) {
   struct MHD_Response *response = NULL;
   int ret = MHD_NO;
   sqlite_int64 id = 0;
@@ -2714,7 +2809,7 @@ static bstring json_snippet_to_html(bstring json, int edit) {
   JSON_GET_ENSURE2(json_result, json_tmp, "title", json_string);
   JSON_GET_ENSURE2(json_result, json_id, "id", json_integer);
 
-  HTML_BCONCAT(ret, (bstring)&web_static_main_header);
+  HTML_BCONCAT(ret, (bstring)&web_static_snippet_header);
   HTML_BCATSCTR(ret, "<div class=\"main\">");
   HTML_BFORMATA(ret, "<h1>%s</h1>", json_tmp->u.string.ptr);
 
@@ -2736,7 +2831,8 @@ static bstring json_snippet_to_html(bstring json, int edit) {
         "%s%s",
         json_id->u.integer,
         json_tmp->u.string.ptr,
-        "</textarea><br><br><input type=\"submit\" value=\"save\"> "
+        "  </textarea>"
+        "<br><br><input type=\"submit\" value=\"save\"> "
         "</form>");
   } else {
     HTML_BFORMATA(ret, "%s", json_tmp->u.string.ptr);
@@ -2764,7 +2860,7 @@ error:
 }
 
 static enum MHD_Result
-mhd_api_static(struct MHD_Connection *connection, struct ConnInfo *ci) {
+mhd_api_handle_static(struct MHD_Connection *connection, struct ConnInfo *ci) {
   int ret = MHD_NO;
   int fd = 0;
   struct stat filestat;
@@ -2835,8 +2931,8 @@ error:
   goto exit;
 }
 
-static enum MHD_Result
-mhd_api_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
+static enum MHD_Result mhd_api_handle_get_snippet(
+    struct MHD_Connection *connection, struct ConnInfo *ci) {
   struct MHD_Response *response = NULL;
   int ret = MHD_NO;
   sqlite_int64 id = 0;
@@ -2992,23 +3088,35 @@ static int mhd_handler(
 
   switch (ci->api_call_name) {
   case RESTAPI_GET_SNIPPET:
-    ret = mhd_api_get_snippet(connection, ci);
+    ret = mhd_api_handle_get_snippet(connection, ci);
     goto exit;
   case RESTAPI_CREATE_SNIPPET:
-    ret = mhd_api_create_snippet(connection, ci, upload_data, upload_data_size);
+    ret = mhd_api_handle_create_snippet(
+        connection, ci, upload_data, upload_data_size);
     goto exit;
   case RESTAPI_FIND_SNIPPETS:
-    ret = mhd_api_find_snippets(connection, ci);
+    ret = mhd_api_handle_find_snippets(connection, ci);
     goto exit;
   case RESTAPI_DELETE_SNIPPET:
-    ret = mhd_api_delete_snippet(connection, ci);
+    ret = mhd_api_handle_delete_snippet(connection, ci);
     goto exit;
   case RESTAPI_STATIC:
-    ret = mhd_api_static(connection, ci);
+    ret = mhd_api_handle_static(connection, ci);
     goto exit;
   case RESTAPI_UPLOAD:
-    ret = mhd_api_upload(connection, ci, upload_data, upload_data_size);
+    ret = mhd_api_handle_upload(connection, ci, upload_data, upload_data_size);
     goto exit;
+  case RESTAPI_UNKNOWN:
+    switch (ci->at) {
+    case HTTP_ACCEPT_TEXT_HTML:
+      ret = mhd_handle_index(connection, ci);
+      goto exit;
+    default:
+    case HTTP_ACCEPT_APPLICATION_JSON:
+    case HTTP_ACCEPT_OTHER:
+      MHD_RESPONSE_WITH_TAGBSTRING(
+          connection, MHD_HTTP_OK, response, status_ok, ret);
+    }
   default:
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_OK, response, status_ok, ret);
