@@ -1,12 +1,10 @@
+#include <assert.h>
 #include <bbstrlib.h>
 #include <bstrlib.h>
 #include <curl/curl.h>
 #include <dbg.h>
 #include <dbw.h>
-#include <event2/buffer.h>
 #include <event2/event.h>
-#include <event2/http.h>
-#include <event2/keyvalq_struct.h>
 #include <fcntl.h>
 #include <json-builder.h>
 #include <json.h>
@@ -80,31 +78,6 @@ static const char *const sendMessagelUrl =
     goto exit;                                                             \
                                                                            \
   } while (0)
-
-#define INTERNAL_ERROR_HANDLE                        \
-  error:                                             \
-  rc = 500;                                          \
-  reason = "Internal Server Error";                  \
-  if (resp != NULL) {                                \
-    evbuffer_drain(resp, evbuffer_get_length(resp)); \
-    if (evbuffer_add_printf(resp, "500") <= 0) {     \
-      evbuffer_free(resp);                           \
-      resp = NULL;                                   \
-    };                                               \
-  }                                                  \
-  goto exit
-
-#define BAD_REQ_HANDLE                                                         \
-  bad_request:                                                                 \
-  rc = 403;                                                                    \
-  reason = "Bad Request";                                                      \
-  bad_request_msg = bad_request_msg == NULL ? "Bad request" : bad_request_msg; \
-  CHECK(                                                                       \
-      evbuffer_add_printf(                                                     \
-          resp, "{\"status\": \"error\", \"msg\": \"%s\"}", bad_request_msg) > \
-          0,                                                                   \
-      "Couldn't append to response buffer");                                   \
-  goto exit
 
 #define HTML_BFORMATA(B, M, ...)                      \
   do {                                                \
@@ -219,7 +192,6 @@ struct YNoteApp {
   struct event_base *evbase;
   uint client_timeout;
   int port;
-  int mhd_port;
   uint updates_offset;
   struct UsersInfo users_info;
   DBWHandler *db_handle;
@@ -282,6 +254,8 @@ enum HTTPServerCallName {
   RESTAPI_FIND_SNIPPETS,
   RESTAPI_UPLOAD,
   RESTAPI_STATIC,
+  HTTP_PATH_GET_SNIPPET,
+  HTTP_PATH_INDEX,
 };
 
 enum HTTPAcceptType {
@@ -1040,7 +1014,6 @@ static int read_config(struct YNoteApp *app, bstring path) {
 
   LUA_CONF_READ_NUMBER(app->client_timeout, client_timeout, 30);
   LUA_CONF_READ_NUMBER(app->port, port, 8080);
-  LUA_CONF_READ_NUMBER(app->mhd_port, mhd_port, 8083);
 
   CHECK(app->port > 0 && app->port < 65535, "Wrong port number");
 
@@ -1086,199 +1059,6 @@ error:
   return;
 }
 
-// read whole input buffer into json_str
-static bstring get_bstr_body(struct evbuffer *ev_buf, bstring buf) {
-  bstring ret = NULL;
-  int bstring_is_allocated = 0;
-  if (buf != NULL) {
-    ret = buf;
-    bstring_is_allocated = 1;
-  } else {
-    ret = bfromcstralloc(BUF_LEN, "");
-    CHECK_MEM(ret);
-  }
-  while (evbuffer_get_length(ev_buf)) {
-    int n;
-    if ((ret->mlen - blength(ret)) < 2) {
-      CHECK((ret->mlen - blength(ret)) > 0, "Wrong string");
-      CHECK(
-          ballocmin(ret, ret->mlen * 2) == BSTR_OK,
-          "Couldn't reallocate string");
-    }
-    n = evbuffer_remove(
-        ev_buf, ret->data + blength(ret), ret->mlen - blength(ret) - 1);
-    CHECK(n >= 0, "Couldn't read from input ev_buffer");
-    ret->slen += n;
-    bdata(ret)[blength(ret)] = '\0';
-  }
-
-  return ret;
-
-error:
-  if (bstring_is_allocated && ret != NULL) {
-    bdestroy(ret);
-  }
-  return NULL;
-}
-
-static void
-api_upload_file(struct evhttp_request *req, const struct YNoteApp *app) {
-  char *reason = "OK";
-  int rc = 200;
-  struct evbuffer *resp = NULL;
-  bstring body = NULL;
-  struct evbuffer *ibuf = NULL;
-
-  struct tagbstring header_tbstr = {0};
-  bstring boundary = NULL;
-
-  bstrListEmb *split_line = NULL;
-  bstrListEmb *split_subline = NULL;
-
-  const char *header_str = NULL;
-
-  (void)app;
-
-  ibuf = evhttp_request_get_input_buffer(req);
-  body = get_bstr_body(ibuf, NULL);
-  header_str =
-      evhttp_find_header(evhttp_request_get_input_headers(req), "content-type");
-  LOG_DEBUG("Got content-type %s", header_str);
-  CHECK(header_str != NULL, "Content-type is missing");
-
-  cstr2tbstr(header_tbstr, header_str);
-  struct tagbstring query = bsStatic("multipart/form-data; boundary=");
-
-  CHECK(
-      bstrncmp(&header_tbstr, &query, blength(&query)) == 0,
-      "mutipart/form-data is expected");
-
-  CHECK(
-      (split_line = bsplit_noalloc(&header_tbstr, ' ')) != NULL,
-      "Couldn't split line");
-
-  CHECK(rv_len(*split_line) >= 2, "wrong line format");
-
-  CHECK(
-      (split_subline = bsplit_noalloc(rv_get(*split_line, 1, NULL), '=')) !=
-          NULL,
-      "Couldn't split line");
-
-  CHECK(rv_len(*split_subline) >= 2, "wrong line format");
-
-  boundary = bstrcpy(rv_get(*split_subline, 1, NULL));
-  CHECK(boundary != NULL, "Couldn't create string");
-
-  bstrListEmb_destroy(split_subline);
-  split_subline = NULL;
-  bstrListEmb_destroy(split_line);
-  split_line = NULL;
-
-  LOG_INFO("boundary = %s", bdata(boundary));
-
-  bassignmidstr(
-      &header_tbstr, &header_tbstr, blength(&query), blength(&header_tbstr));
-
-  LOG_DEBUG("Got body %s", bdata(body));
-  LOG_DEBUG("Got body decoded %s", evhttp_decode_uri(bdata(body)));
-  LOG_INFO("File uploaded");
-
-  resp = evbuffer_new();
-  CHECK_MEM(resp);
-  evhttp_add_header(
-      evhttp_request_get_output_headers(req),
-      "Content-Type",
-      "application/json");
-
-  CHECK(
-      evbuffer_add_printf(resp, "{\"status\": \"ok\"}"),
-      "Couldn't append to response buffer");
-
-exit:
-  if (resp != NULL) {
-    evhttp_send_reply(req, rc, reason, resp);
-  } else {
-    evhttp_send_reply(req, rc, reason, NULL);
-  }
-  evbuffer_free(resp);
-  if (body != NULL) {
-    bdestroy(body);
-  }
-  if (boundary != NULL) {
-    bdestroy(boundary);
-  }
-  if (split_subline != NULL) {
-    bstrListEmb_destroy(split_subline);
-  }
-  if (split_line != NULL) {
-    bstrListEmb_destroy(split_line);
-  }
-  return;
-
-error:
-  rc = 500;
-  reason = "Internal Server Error";
-  if (resp != NULL) {
-    evbuffer_drain(resp, evbuffer_get_length(resp));
-    if (evbuffer_add_printf(resp, "500") <= 0) {
-      evbuffer_free(resp);
-      resp = NULL;
-    };
-  }
-  goto exit;
-}
-
-static void
-json_api_cb(struct evhttp_request *req, const struct YNoteApp *app) {
-  char *reason = "OK";
-  int rc = 200;
-  struct evbuffer *resp = NULL;
-
-  (void)app;
-
-  resp = evbuffer_new();
-  CHECK_MEM(resp);
-  evhttp_add_header(
-      evhttp_request_get_output_headers(req),
-      "Content-Type",
-      "application/json");
-
-  LOG_DEBUG(
-      "Got request for path %s",
-      evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req)));
-
-  CHECK(
-      evbuffer_add_printf(resp, "{\"status\": \"ok\"}"),
-      "Couldn't append to response buffer");
-
-exit:
-  if (resp != NULL) {
-    evhttp_send_reply(req, rc, reason, resp);
-  } else {
-    evhttp_send_reply(req, rc, reason, NULL);
-  }
-  evbuffer_free(resp);
-  return;
-
-error:
-  rc = 500;
-  reason = "Internal Server Error";
-  if (resp != NULL) {
-    evbuffer_drain(resp, evbuffer_get_length(resp));
-    if (evbuffer_add_printf(resp, "500") <= 0) {
-      evbuffer_free(resp);
-      resp = NULL;
-    };
-  }
-  goto exit;
-}
-
-static void simple_free_cb(const void *data, size_t datalen, void *extra) {
-  (void)datalen;
-  (void)extra;
-  free((void *)data);
-}
-
 static void bstring_free_cb(const void *data, size_t datalen, void *extra) {
   (void)data;
   (void)datalen;
@@ -1308,384 +1088,6 @@ error:
     bdestroy(json_str_res);
   }
   return NULL;
-}
-
-static void ev_json_api_get_snippet(
-    struct evhttp_request *req, const struct YNoteApp *app) {
-  char *reason = "OK";
-  int ret_code = 200;
-  struct evbuffer *resp = NULL;
-  char edit = 0;
-  const char *id_str = NULL;
-  const char *edit_str = NULL;
-  sqlite_int64 id = 0;
-  struct evkeyvalq queries;
-  const char *bad_request_msg = NULL;
-  bstring json_str_res = NULL;
-  int rc = 0;
-
-  resp = evbuffer_new();
-  CHECK_MEM(resp);
-
-  evhttp_add_header(
-      evhttp_request_get_output_headers(req),
-      "Content-Type",
-      "application/json; charset=UTF-8");
-
-  CHECK(
-      evhttp_parse_query_str(
-          evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)), &queries) ==
-          0,
-      "Couldn't parse query str");
-  id_str = evhttp_find_header(&queries, "id");
-  if (id_str == NULL) {
-    bad_request_msg = bdata(&status_id_required);
-    goto bad_request;
-  }
-  PARSE_INT(strtoll, id_str, id, rc);
-  if (rc == 1) {
-    bad_request_msg = bdata(&status_id_required);
-    goto bad_request;
-  }
-  edit_str = evhttp_find_header(&queries, "edit");
-  if (edit_str != NULL && biseqcstrcaseless(&s_true, edit_str)) {
-    edit = 1;
-  }
-  LOG_DEBUG("json_api_get_snippet got %lld", id);
-  json_str_res = json_api_get_snippet(app->db_handle, id, !edit, &ret_code);
-  if (json_str_res == NULL) {
-    goto error;
-  }
-
-  if (ret_code == 404) {
-    reason = "Not Found";
-  }
-
-  CHECK(
-      evbuffer_add_reference(
-          resp,
-          bdata(json_str_res),
-          blength(json_str_res),
-          bstring_free_cb,
-          json_str_res) == 0,
-      "Couldn't append json to output buffer");
-
-  // bstring should be freed by bstring_free_cb then
-  json_str_res = NULL;
-exit:
-  evhttp_clear_headers(&queries);
-  if (resp != NULL) {
-    evhttp_send_reply(req, ret_code, reason, resp);
-  } else {
-    evhttp_send_reply(req, ret_code, reason, NULL);
-  }
-  evbuffer_free(resp);
-  if (json_str_res != NULL) {
-    bdestroy(json_str_res);
-  }
-  LOG_DEBUG("Ret code is %i", ret_code);
-  return;
-
-error:
-  ret_code = 500;
-  reason = "Internal Server Error";
-  if (resp != NULL) {
-    evbuffer_drain(resp, evbuffer_get_length(resp));
-    if (evbuffer_add_printf(resp, "500") <= 0) {
-      evbuffer_free(resp);
-      resp = NULL;
-    };
-  }
-  goto exit;
-bad_request:
-  ret_code = 403;
-  reason = "Bad Request";
-  bad_request_msg = bad_request_msg == NULL ? "Bad request" : bad_request_msg;
-  CHECK(
-      evbuffer_add_printf(resp, "%s", bad_request_msg),
-      "Couldn't append to response buffer");
-  goto exit;
-}
-
-static void evjson_api_find_snippets(
-    struct evhttp_request *req, const struct YNoteApp *app) {
-  char *reason = "OK";
-  int rc = 200;
-  int err = 0;
-  struct evbuffer *resp = NULL;
-  struct evkeyvalq queries;
-  bstrListEmb *taglist = NULL;
-  const char *tmp_cstr = NULL;
-  bstring json_str_res = NULL;
-  struct tagbstring snippet_type = {0};
-
-  resp = evbuffer_new();
-  CHECK_MEM(resp);
-
-  evhttp_add_header(
-      evhttp_request_get_output_headers(req),
-      "Content-Type",
-      "application/json; charset=UTF-8");
-
-  CHECK(
-      evhttp_parse_query_str(
-          evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)), &queries) ==
-          0,
-      "Couldn't parse query str");
-
-  tmp_cstr = evhttp_find_header(&queries, "tags");
-  if (tmp_cstr != NULL) {
-    if (!strcmp(tmp_cstr, "")) {
-      taglist = calloc(1, sizeof(bstrListEmb));
-      CHECK(taglist != NULL, "Couldn't create empty taglist");
-    } else {
-      struct tagbstring tagstr = {0};
-      btfromcstr(tagstr, tmp_cstr);
-      LOG_DEBUG("%s, %s", tmp_cstr, bdata(&tagstr));
-      taglist = bsplit_noalloc(&tagstr, ',');
-      CHECK(taglist != NULL, "Couldn't split tags string");
-    }
-  }
-
-  tmp_cstr = evhttp_find_header(&queries, "type");
-  if (tmp_cstr != NULL && strcmp(tmp_cstr, "")) {
-    btfromcstr(snippet_type, tmp_cstr);
-  }
-
-  json_str_res =
-      dbw_find_snippets(app->db_handle, NULL, &snippet_type, taglist, &err);
-
-  CHECK(
-      json_str_res != NULL && blength(json_str_res) > 0 && err == DBW_OK,
-      "Couldn't get snippets");
-
-  CHECK(
-      evbuffer_add_reference(
-          resp,
-          bdata(json_str_res),
-          blength(json_str_res),
-          bstring_free_cb,
-          json_str_res) == 0,
-      "Couldn't append json to output buffer");
-
-  // bstring should be free by bstring_free_cb then
-  json_str_res = NULL;
-exit:
-  evhttp_clear_headers(&queries);
-  if (resp != NULL) {
-    evhttp_send_reply(req, rc, reason, resp);
-  } else {
-    evhttp_send_reply(req, rc, reason, NULL);
-  }
-  evbuffer_free(resp);
-  if (json_str_res != NULL) {
-    bdestroy(json_str_res);
-  }
-  if (taglist != NULL) {
-    bstrListEmb_destroy(taglist);
-  }
-  return;
-
-error:
-  rc = 500;
-  reason = "Internal Server Error";
-  if (resp != NULL) {
-    evbuffer_drain(resp, evbuffer_get_length(resp));
-    if (evbuffer_add_printf(resp, "500") <= 0) {
-      evbuffer_free(resp);
-      resp = NULL;
-    };
-  }
-  goto exit;
-}
-
-static void ev_json_api_delete_snippet(
-    struct evhttp_request *req, const struct YNoteApp *app) {
-  char *reason = "OK";
-  int rc = 200;
-  struct evbuffer *resp = NULL;
-  struct evkeyvalq queries;
-  sqlite_int64 snippet_id = 0;
-  char *tmp_cstr = NULL;
-  char *bad_request_msg = NULL;
-  bstring json_str_res = NULL;
-
-  resp = evbuffer_new();
-  CHECK_MEM(resp);
-
-  evhttp_add_header(
-      evhttp_request_get_output_headers(req),
-      "Content-Type",
-      "application/json; charset=UTF-8");
-
-  CHECK(
-      evhttp_parse_query_str(
-          evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)), &queries) ==
-          0,
-      "Couldn't parse query str");
-
-  tmp_cstr = (char *)evhttp_find_header(&queries, "id");
-  if (tmp_cstr == NULL) {
-    bad_request_msg = "id is required when deleting snippet";
-    goto bad_request;
-  }
-  PARSE_INT(strtoll, tmp_cstr, snippet_id, rc);
-  if (rc == 1) {
-    bad_request_msg = "malformed id";
-    goto bad_request;
-  }
-  json_str_res = json_api_delete_snippet(app->db_handle, snippet_id);
-  CHECK(json_str_res != NULL, "Couldn't delete snippet");
-  CHECK(
-      evbuffer_add_reference(
-          resp,
-          bdata(json_str_res),
-          blength(json_str_res),
-          bstring_free_cb,
-          json_str_res) == 0,
-      "Couldn't append json to output buffer");
-
-  // bstring should be freed by bstring_free_cb then
-  json_str_res = NULL;
-
-exit:
-  evhttp_clear_headers(&queries);
-  if (resp != NULL) {
-    evhttp_send_reply(req, rc, reason, resp);
-  } else {
-    evhttp_send_reply(req, rc, reason, NULL);
-  }
-  evbuffer_free(resp);
-  if (json_str_res != NULL) {
-    bdestroy(json_str_res);
-  }
-  return;
-
-  INTERNAL_ERROR_HANDLE;
-  BAD_REQ_HANDLE;
-}
-
-static void ev_json_api_create_snippet(
-    struct evhttp_request *req, const struct YNoteApp *app) {
-  int rc = 200;
-  int err = 0;
-  char *reason = "OK";
-  char *cbuf = NULL;
-  char *bad_request_msg = NULL;
-  struct evbuffer *ibuf = NULL;
-  struct evbuffer *resp = NULL;
-  bstring json_str = NULL;
-  sqlite_int64 snippet_id = 0;
-  struct evkeyvalq queries = {0};
-  char edit = 0;
-  char *tmp_cstr = NULL;
-  bstring response = NULL;
-
-  resp = evbuffer_new();
-  CHECK_MEM(resp);
-
-  CHECK(
-      evhttp_parse_query_str(
-          evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req)), &queries) ==
-          0,
-      "Couldn't parse query str");
-
-  tmp_cstr = (char *)evhttp_find_header(&queries, "edit");
-  if (tmp_cstr != NULL) {
-    LOG_DEBUG("tmp_cstr %s", tmp_cstr);
-    if (biseqcstrcaseless(&s_true, tmp_cstr)) {
-      edit = 1;
-      tmp_cstr = (char *)evhttp_find_header(&queries, "id");
-      if (tmp_cstr == NULL) {
-        bad_request_msg = "id is required when editing snippet";
-        goto bad_request;
-      }
-      PARSE_INT(strtoll, tmp_cstr, snippet_id, rc);
-      if (rc == 1) {
-        bad_request_msg = "malformed id";
-        goto bad_request;
-      }
-    }
-  }
-
-  cbuf = malloc(BUF_LEN);
-  CHECK_MEM(cbuf);
-
-  json_str = bfromcstralloc(BUF_LEN, "");
-  CHECK_MEM(json_str);
-
-  switch (evhttp_request_get_command(req)) {
-  case EVHTTP_REQ_POST:
-    break;
-  default:
-    rc = 405;
-    reason = "Method not allowed";
-    CHECK(
-        evbuffer_add_printf(resp, "405: Method not allowed") != -1,
-        "Couldn't add to buf");
-    goto exit;
-  }
-
-  ibuf = evhttp_request_get_input_buffer(req);
-  // read whole input buffer into json_str
-  json_str = get_bstr_body(ibuf, json_str);
-  CHECK(json_str != NULL, "Couldn't read body");
-  while (evbuffer_get_length(ibuf)) {
-    int n;
-    if ((json_str->mlen - blength(json_str)) < 2) {
-      CHECK((json_str->mlen - blength(json_str)) > 0, "Wrong string");
-      CHECK(
-          ballocmin(json_str, json_str->mlen * 2) == BSTR_OK,
-          "Couldn't reallocate string");
-    }
-    n = evbuffer_remove(
-        ibuf,
-        json_str->data + blength(json_str),
-        json_str->mlen - blength(json_str) - 1);
-    CHECK(n >= 0, "Couldn't read from input buffer");
-    json_str->slen += n;
-    bdata(json_str)[blength(json_str)] = '\0';
-  }
-
-  LOG_DEBUG(
-      "Got json(?) %.100s, blength = %d, mlength = %d",
-      bdata(json_str),
-      blength(json_str),
-      json_str->mlen);
-
-  response =
-      json_api_create_snippet(app->db_handle, json_str, snippet_id, edit, &rc);
-  CHECK(response != NULL, "Couldn't create snippet");
-
-  evhttp_add_header(
-      evhttp_request_get_output_headers(req),
-      "Content-Type",
-      "application/json");
-
-  CHECK(
-      evbuffer_add(resp, bdata(response), blength(response)) == 0,
-      "Couldn't append to response buffer");
-
-exit:
-  if (response != NULL) {
-    bdestroy(response);
-  }
-  if (json_str != NULL) {
-    bdestroy(json_str);
-  }
-  if (cbuf != NULL) {
-    free(cbuf);
-  }
-  if (resp != NULL) {
-    evhttp_send_reply(req, rc, reason, resp);
-  } else {
-    evhttp_send_reply(req, rc, reason, NULL);
-  }
-  evbuffer_free(resp);
-  return;
-
-  INTERNAL_ERROR_HANDLE;
-  BAD_REQ_HANDLE;
 }
 
 static void ynote_app_destroy(struct YNoteApp *app) {
@@ -2642,18 +2044,30 @@ error:
   goto exit;
 }
 
-static const struct tagbstring select_snippets_sql = bsStatic(
-    "select snippets.id, snippets.title, substr(snippets.content, 1, 50) as content, group_concat(tags.name, ', ') from "
+static const struct tagbstring get_dirs_sql =
+    bsStatic("select c.id as id, html_escape(c.name) as name from dirs as a "
+             "join dir_to_dirs "
+             "as b on a.id = b.dir_id join dirs as c on b.child_id = c.id  "
+             " where a.id = ?");
+static const struct tagbstring get_snippets_sql = bsStatic(
+    "select snippets.id, html_escape(snippets.title), substr(snippets.content, "
+    "1, 50) as content, group_concat(tags.name, ', ') from "
     "snippets left "
     "join snippet_to_tags on snippets.id = snippet_to_tags.snippet_id left "
-    "join tags on snippet_to_tags.tag_id = tags.id group by snippets.id;");
+    "join tags on snippet_to_tags.tag_id = tags.id where snippets.dir = ? "
+    "group by snippets.id;");
 
 static enum MHD_Result
 mhd_handle_index(struct MHD_Connection *connection, struct ConnInfo *ci) {
 
+  assert(strstartswith(ci->url, "/root"));
+
   struct MHD_Response *response = NULL;
   sqlite3_stmt *stmt = NULL;
   bstring response_string = NULL;
+
+  sqlite_int64 dir = 1;
+  struct tagbstring tbpath = {0};
 
   int err = 0;
   int ret = MHD_NO;
@@ -2667,6 +2081,16 @@ mhd_handle_index(struct MHD_Connection *connection, struct ConnInfo *ci) {
         ret);
   }
 
+  btfromcstr(tbpath, ci->url);
+  CHECK(blength(&tbpath) >= strlen("/root"), "Wrong path");
+  bmid2tbstr(tbpath, &tbpath, strlen("/root"), blength(&tbpath));
+
+  if (blength(&tbpath) > 0) {
+    CHECK(
+        (dir = dbw_path_descend(ci->app->db_handle, &tbpath, NULL)) > 0,
+        "Wrong path");
+  }
+
   response_string = bfromcstr("");
   CHECK(response_string != NULL, "Couldn't create string");
   HTML_BCONCAT(response_string, (bstring)&web_static_main_header);
@@ -2674,12 +2098,16 @@ mhd_handle_index(struct MHD_Connection *connection, struct ConnInfo *ci) {
   CHECK(
       sqlite3_prepare_v2(
           ci->app->db_handle->conn,
-          bdata(&select_snippets_sql),
-          blength(&select_snippets_sql) + 1,
+          bdata(&get_dirs_sql),
+          blength(&get_dirs_sql) + 1,
           &stmt,
           NULL) == SQLITE_OK,
       "Couldn't prepare statement: %s",
       sqlite3_errmsg(ci->app->db_handle->conn));
+
+  CHECK(
+      sqlite3_bind_int64(stmt, 1, dir) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
 
   CHECK(
       (err = sqlite3_step(stmt), err == SQLITE_DONE || err == SQLITE_ROW),
@@ -2694,9 +2122,47 @@ mhd_handle_index(struct MHD_Connection *connection, struct ConnInfo *ci) {
       HTML_BFORMATA(
           response_string,
           "<a rel=\"noopener noreferrer\" "
-          "href=\"//localhost:8083/api/get_snippet?id=%lld\" "
+          "href=\"//localhost:%d%s/%s\" "
+          "class=\"list-item\"> 📁:%lld <span class=\"muted\">[</span><span "
+          "class=\"identifier\">%s</span><span class=\"muted\">]</span>"
+          "</a><br>",
+          ci->app->port,
+          ci->url,
+          sqlite3_column_text(stmt, 1),
+          sqlite3_column_int64(stmt, 0),
+          sqlite3_column_text(stmt, 1));
+
+    } while (err = sqlite3_step(stmt), err == SQLITE_ROW);
+  }
+
+  CHECK(
+      sqlite3_prepare_v2(
+          ci->app->db_handle->conn,
+          bdata(&get_snippets_sql),
+          blength(&get_snippets_sql) + 1,
+          &stmt,
+          NULL) == SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(ci->app->db_handle->conn));
+
+  CHECK(
+      sqlite3_bind_int64(stmt, 1, dir) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
+  CHECK(
+      (err = sqlite3_step(stmt), err == SQLITE_DONE || err == SQLITE_ROW),
+      "Couldn't select snippets");
+
+  if (err == SQLITE_ROW) {
+    do {
+      HTML_BFORMATA(
+          response_string,
+          "<a rel=\"noopener noreferrer\" "
+          "href=\"//localhost:%d/get_snippet/%lld\" "
           "class=\"list-item\"> ID:%lld <span class=\"muted\">[</span><span "
-          "class=\"identifier\">%s</span><span class=\"muted\">]</span> %s </a><br>",
+          "class=\"identifier\">%s</span><span class=\"muted\">]</span> %s "
+          "</a><br>",
+          ci->app->port,
           sqlite3_column_int64(stmt, 0),
           sqlite3_column_int64(stmt, 0),
           sqlite3_column_text(stmt, 1),
@@ -2931,6 +2397,177 @@ error:
   goto exit;
 }
 
+static const struct tagbstring get_snippet_sql = bsStatic(
+    "      SELECT snippets.id as id,"
+    "             html_escape(title),"
+    "             md2html(content),"
+    "             snippet_types.name AS type,"
+    "             datetime(created, 'localtime') AS created,"
+    "             datetime(updated, 'localtime') AS updated,"
+    "             group_concat(tags.name, ', ') "
+    " FROM " SNIPPETS_TABLE "               LEFT JOIN " SNIPPET_TYPES_TABLE
+    " ON " SNIPPETS_TABLE "  .type = " SNIPPET_TYPES_TABLE ".id"
+    "               LEFT JOIN " SNIPPET_TO_TAGS_TABLE " ON " SNIPPETS_TABLE
+    "  .id = " SNIPPET_TO_TAGS_TABLE ".snippet_id"
+    "               LEFT JOIN " TAGS_TABLE " ON " SNIPPET_TO_TAGS_TABLE
+    "  .tag_id = " TAGS_TABLE ".id"
+    "      WHERE " SNIPPETS_TABLE ".id=?");
+
+static const struct tagbstring get_snippet_to_edit_sql = bsStatic(
+    "      SELECT snippets.id as id,"
+    "             title,"
+    "             content,"
+    "             snippet_types.name AS type,"
+    "             datetime(created, 'localtime') AS created,"
+    "             datetime(updated, 'localtime') AS updated,"
+    "             group_concat(tags.name, ', ') "
+    " FROM " SNIPPETS_TABLE "               LEFT JOIN " SNIPPET_TYPES_TABLE
+    " ON " SNIPPETS_TABLE "  .type = " SNIPPET_TYPES_TABLE ".id"
+    "               LEFT JOIN " SNIPPET_TO_TAGS_TABLE " ON " SNIPPETS_TABLE
+    "  .id = " SNIPPET_TO_TAGS_TABLE ".snippet_id"
+    "               LEFT JOIN " TAGS_TABLE " ON " SNIPPET_TO_TAGS_TABLE
+    "  .tag_id = " TAGS_TABLE ".id"
+    "      WHERE " SNIPPETS_TABLE ".id=?");
+
+static enum MHD_Result
+mhd_handle_get_snippet(struct MHD_Connection *connection, struct ConnInfo *ci) {
+  struct MHD_Response *response = NULL;
+  int ret = MHD_NO;
+  sqlite_int64 id = 0;
+  int rc = 0;
+  int return_html = 0;
+  const char *header_str = NULL;
+  const char *edit_str = NULL;
+  char edit = 0;
+  int err = 0;
+  sqlite3_stmt *stmt = NULL;
+  bstring response_string = NULL;
+  bstrListEmb *split_path = NULL;
+  json_value *parsed_snippet = NULL;
+
+  edit_str =
+      MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "edit");
+  if (edit_str != NULL && biseqcstrcaseless(&s_true, edit_str)) {
+    edit = 1;
+  }
+
+  if (ci->method_name != RESTMETHOD_GET) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        status_method_not_allowed,
+        ret);
+  }
+  CHECK(
+      (split_path = bcstrsplit_noalloc(ci->url, '/')) != NULL,
+      "Couldn't split line");
+
+  if (split_path->n != 3) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+  }
+
+  PARSE_INT(strtoll, bdata(&split_path->a[2]), id, rc);
+  if (rc == 1) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, status_id_required, ret);
+  }
+  bstrListEmb_destroy(split_path);
+  split_path = NULL;
+
+  bstring query = (bstring)(edit ? &get_snippet_to_edit_sql : &get_snippet_sql);
+
+  CHECK(
+      sqlite3_prepare_v2(
+          ci->app->db_handle->conn,
+          bdata(query),
+          blength(query) + 1,
+          &stmt,
+          NULL) == SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(ci->app->db_handle->conn));
+
+  CHECK(
+      sqlite3_bind_int64(stmt, 1, id) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
+  CHECK(
+      (err = sqlite3_step(stmt), err == SQLITE_DONE || err == SQLITE_ROW),
+      "Couldn't select snippets");
+  if (err == SQLITE_DONE) {
+
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_NOT_FOUND,
+        response,
+        status_snippet_not_found,
+        ret);
+  }
+
+  response_string = bfromcstr("");
+  CHECK(response_string != NULL, "Couldn't create string");
+
+  HTML_BCONCAT(response_string, (bstring)&web_static_snippet_header);
+  HTML_BCATSCTR(response_string, "<div class=\"main\">");
+  HTML_BFORMATA(response_string, "<h1>%s</h1>", sqlite3_column_text(stmt, 1));
+
+  if (edit) {
+    HTML_BFORMATA(
+        response_string,
+        "<form accept-charset=\"UTF-8\""
+        " enctype=\"text/plain\""
+        " action=\"/api/create_snippet?edit=true&id=%lld\" "
+        " method=\"post\">"
+        "  <textarea "
+        "    class=\"content\""
+        "    cols=\"70\""
+        "    id=\"content\""
+        "    name=\"content\""
+        "    rows=\"30\">"
+        "+++\n"
+        "title = %s\n"
+        "type = %s\n"
+        "tags = %s\n"
+        "+++\n"
+        "%s%s",
+        sqlite3_column_int64(stmt, 0),
+        sqlite3_column_text(stmt, 1),
+        sqlite3_column_text(stmt, 3),
+        sqlite3_column_text(stmt, 6),
+        sqlite3_column_text(stmt, 2),
+        "  </textarea>"
+        "<br><br><input type=\"submit\" value=\"save\"> "
+        "</form>");
+  } else {
+    HTML_BFORMATA(response_string, "%s", sqlite3_column_text(stmt, 2));
+  }
+  HTML_BCATSCTR(response_string, "</div>");
+
+  HTML_BCONCAT(response_string, (bstring)&web_static_main_footer);
+
+  MHD_RESPONSE_WITH_BSTRING_CT(
+      connection, MHD_HTTP_OK, response, response_string, ret, "text/html");
+
+response_500:
+  if (response_string != NULL) {
+    bdestroy(response_string);
+  }
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_INTERNAL_SERVER_ERROR,
+      response,
+      status_server_error,
+      ret);
+exit:
+  if (split_path != NULL) {
+    bstrListEmb_destroy(split_path);
+  }
+  return ret;
+error:
+  goto response_500;
+}
+
 static enum MHD_Result mhd_api_handle_get_snippet(
     struct MHD_Connection *connection, struct ConnInfo *ci) {
   struct MHD_Response *response = NULL;
@@ -2993,6 +2630,9 @@ static enum MHD_Result mhd_api_handle_get_snippet(
   }
 
 response_500:
+  if (str_res != NULL) {
+    bdestroy(str_res);
+  }
   MHD_RESPONSE_WITH_TAGBSTRING(
       connection,
       MHD_HTTP_INTERNAL_SERVER_ERROR,
@@ -3008,8 +2648,7 @@ exit:
   }
   return ret;
 error:
-  ret = MHD_NO;
-  goto exit;
+  goto response_500;
 }
 
 static void mhd_log(void *cls, const char *fm, va_list ap) {
@@ -3061,6 +2700,12 @@ static int mhd_handler(
       call_name = RESTAPI_UPLOAD;
     } else if (!strncmp(url, "/static/", strlen("/static/"))) {
       call_name = RESTAPI_STATIC;
+    } else if (!strncmp(url, "/get_snippet/", strlen("/get_snippet/"))) {
+      call_name = HTTP_PATH_GET_SNIPPET;
+    } else if (
+        !strncmp(url, "/root", strlen("/root")) ||
+        !strncmp(url, "/root/", strlen("/root/"))) {
+      call_name = HTTP_PATH_INDEX;
     } else {
       call_name = RESTAPI_UNKNOWN;
     }
@@ -3090,6 +2735,9 @@ static int mhd_handler(
   case RESTAPI_GET_SNIPPET:
     ret = mhd_api_handle_get_snippet(connection, ci);
     goto exit;
+  case HTTP_PATH_GET_SNIPPET:
+    ret = mhd_handle_get_snippet(connection, ci);
+    goto exit;
   case RESTAPI_CREATE_SNIPPET:
     ret = mhd_api_handle_create_snippet(
         connection, ci, upload_data, upload_data_size);
@@ -3106,7 +2754,7 @@ static int mhd_handler(
   case RESTAPI_UPLOAD:
     ret = mhd_api_handle_upload(connection, ci, upload_data, upload_data_size);
     goto exit;
-  case RESTAPI_UNKNOWN:
+  case HTTP_PATH_INDEX:
     switch (ci->at) {
     case HTTP_ACCEPT_TEXT_HTML:
       ret = mhd_handle_index(connection, ci);
@@ -3117,6 +2765,7 @@ static int mhd_handler(
       MHD_RESPONSE_WITH_TAGBSTRING(
           connection, MHD_HTTP_OK, response, status_ok, ret);
     }
+  case RESTAPI_UNKNOWN:
   default:
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_OK, response, status_ok, ret);
@@ -3140,8 +2789,6 @@ error:
 int main(int argc, char *argv[]) {
   int rc = 0;
   rc = 0;
-  struct evhttp *http = NULL;
-  struct evhttp_bound_socket *handle = NULL;
   struct YNoteApp *app = NULL;
   struct event *intterm_event = NULL;
 
@@ -3151,16 +2798,6 @@ int main(int argc, char *argv[]) {
 
   app = ynote_app_create(argc, argv);
   CHECK(app != NULL, "Couldn't create app");
-  CHECK(
-      (http = evhttp_new(app->evbase)) != NULL,
-      "Couldn't initialize http handle");
-
-  evhttp_set_default_content_type(http, "text/html");
-
-  CHECK(
-      (handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", app->port)) !=
-          NULL,
-      "Couldn't bind to a socket");
 
   if (app->tg_bot_enabled) {
     CHECK(http_client_init(app) == 0, "Couldn't initialize http client");
@@ -3168,43 +2805,11 @@ int main(int argc, char *argv[]) {
     http_client_get_updates_req(app);
   }
 
-  evhttp_set_cb(
-      http,
-      "/api/create_snippet",
-      (void (*)(struct evhttp_request *, void *))ev_json_api_create_snippet,
-      app);
-
-  evhttp_set_cb(
-      http,
-      "/api/find_snippets",
-      (void (*)(struct evhttp_request *, void *))evjson_api_find_snippets,
-      app);
-
-  evhttp_set_cb(
-      http,
-      "/api/get_snippet",
-      (void (*)(struct evhttp_request *, void *))ev_json_api_get_snippet,
-      app);
-
-  evhttp_set_cb(
-      http,
-      "/api/delete_snippet",
-      (void (*)(struct evhttp_request *, void *))ev_json_api_delete_snippet,
-      app);
-
-  evhttp_set_cb(
-      http,
-      "/api/upload",
-      (void (*)(struct evhttp_request *, void *))api_upload_file,
-      app);
-
-  evhttp_set_gencb(
-      http, (void (*)(struct evhttp_request *, void *))json_api_cb, app);
-
   CHECK(
       (intterm_event = evsignal_new(
            app->evbase, SIGTERM, sigint_term_handler, app)) != NULL,
       "Couldn't create sigterm handler");
+
   CHECK(
       event_add(intterm_event, NULL) == 0,
       "Couldn't add sigterm handler to event loop");
@@ -3213,16 +2818,16 @@ int main(int argc, char *argv[]) {
       (intterm_event =
            evsignal_new(app->evbase, SIGINT, sigint_term_handler, app)) != NULL,
       "Couldn't create sigint handler");
+
   CHECK(
       event_add(intterm_event, NULL) == 0,
       "Couldn't add sigint handler to event loop");
 
   struct MHD_Daemon *daemon;
-  LOG_INFO("mhd port %d", app->mhd_port);
 
   daemon = MHD_start_daemon(
       MHD_USE_EPOLL_INTERNAL_THREAD | MHD_USE_ERROR_LOG,
-      app->mhd_port,
+      app->port,
       NULL,
       NULL,
       (MHD_AccessHandlerCallback)mhd_handler,
@@ -3235,11 +2840,9 @@ int main(int argc, char *argv[]) {
       NULL,
       MHD_OPTION_END);
 
-  LOG_INFO("Server started, port %d, mhd_port %d", app->port, app->mhd_port);
+  LOG_INFO("Server started, port %d", app->port);
 
   event_base_dispatch(app->evbase);
-  // event_base_loop(app->evbase, EVLOOP_ONCE);
-  //
 
 exit:
   if (app != NULL) {
