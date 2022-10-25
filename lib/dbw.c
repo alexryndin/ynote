@@ -2,9 +2,9 @@
 #include "dbg.h"
 #include "json-builder.h"
 #include "json.h"
+#include <assert.h>
 #include <bstrlib.h>
 #include <md4c-html.h>
-#include <md4c.h>
 #include <rvec.h>
 #include <sqlite3.h>
 #include <stdlib.h>
@@ -30,13 +30,6 @@
     }                                                                      \
     CHECK(bdestroy(question_marks) == BSTR_OK, "Couldn't destroy string"); \
   } while (0)
-
-#define SNIPPETS_TABLE        "snippets"
-#define SNIPPET_TYPES_TABLE   "snippet_types"
-#define TAGS_TABLE            "tags"
-#define SNIPPET_TO_TAGS_TABLE "snippet_to_tags"
-#define FILES_TABLE           "files"
-#define FILES_TO_TAGS_TABLE   "files_to_tags"
 
 static const struct tagbstring _insert_snippet_sql =
     bsStatic("INSERT INTO " SNIPPETS_TABLE
@@ -435,6 +428,79 @@ error:
 // * SQLite
 // ******************************
 //
+static sqlite_int64
+sqlite3_path_descend(DBWHandler *h, bstring path, enum DBWError *ret_err) {
+  bstrListEmb *split_path = NULL;
+  sqlite3_stmt *stmt = NULL;
+  sqlite_int64 ret = 1;
+  int err = 0;
+  struct tagbstring q = bsStatic("select c.id from dirs as a"
+                                 " join dir_to_dirs as b on a.id == b.dir_id"
+                                 " join dirs as c on b.child_id == c.id"
+                                 " where a.id = ? and c.name = ?");
+
+  CHECK(bdata(path) != NULL, "Null string");
+  CHECK(blength(path) > 0 && bdata(path)[0] == '/', "Wrong path");
+
+  if (blength(path) == 1) {
+    ret = 1;
+    goto exit;
+  }
+
+  CHECK(
+      (split_path = bcstrsplit_noalloc(bdata(path), '/')) != NULL,
+      "Couldn't split line");
+
+  for (size_t i = 1; i < split_path->n; i++) {
+    if (blength(&split_path->a[i]) == 0) {
+      continue;
+    }
+    CHECK(
+        sqlite3_prepare_v2(h->conn, bdata(&q), blength(&q) + 1, &stmt, NULL) ==
+            SQLITE_OK,
+        "Couldn't prepare statement: %s",
+        sqlite3_errmsg(h->conn));
+    CHECK(
+        sqlite3_bind_int64(stmt, 1, ret) == SQLITE_OK,
+        "Couldn't bind parameter to statement");
+    CHECK(
+        sqlite3_bind_text(stmt, 2, bdata(&split_path->a[i]),
+              -1,
+              NULL) == SQLITE_OK,
+        "Couldn't bind parameter to statement");
+    err = sqlite3_step(stmt);
+    switch (err) {
+    case SQLITE_DONE:
+      if (ret_err != NULL) {
+        *ret_err = DBW_ERR_NOT_FOUND;
+        goto error;
+      }
+      break;
+    case SQLITE_ROW:
+      ret = sqlite3_column_int64(stmt, 0);
+    default:
+      LOG_ERR("Couldn't get row from table: %s", sqlite3_errmsg(h->conn));
+      goto error;
+    }
+  }
+
+  if (ret_err != NULL) {
+    *ret_err = DBW_OK;
+  }
+exit:
+  if (stmt != NULL) {
+    sqlite3_finalize(stmt);
+  }
+  if (split_path != NULL) {
+    bstrListEmb_destroy(split_path);
+  }
+  return ret;
+error:
+  if (ret_err != NULL && *ret_err == DBW_OK) {
+    *ret_err = DBW_ERR;
+  }
+  goto exit;
+}
 static bstring
 sqlite3_get_snippet(DBWHandler *h, sqlite_int64 id, enum DBWError *ret_err) {
   int err = 0;
@@ -740,6 +806,7 @@ exit:
   if (stmt != NULL) {
     sqlite3_finalize(stmt);
   }
+  return ret;
 error:
   ret = DBW_ERR;
   goto exit;
@@ -859,6 +926,7 @@ static enum DBWError sqlite3_ensure_tags(
     CHECK(sqlite3_step(stmt) == SQLITE_DONE, "Couldn't insert tags");
 
     CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+    stmt = NULL;
     bdestroy(q);
     q = NULL;
   }
@@ -999,6 +1067,10 @@ static sqlite3_int64 sqlite3_edit_snippet(
       if (err == SQLITE_CONSTRAINT) {
         rc = DBW_ERR_ALREADY_EXISTS;
       }
+      goto error;
+    }
+    if (sqlite3_changes64(h->conn) != 1) {
+      rc = DBW_ERR_NOT_FOUND;
       goto error;
     }
 
@@ -1244,6 +1316,86 @@ error:
   goto exit;
 }
 
+static void
+sqlite3_md2html(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+  assert(argc == 1);
+  bstring ret = bfromcstr("");
+  if (ret == NULL) {
+    sqlite3_result_error_nomem(ctx);
+    return;
+  }
+  const unsigned char *text = sqlite3_value_text(argv[0]);
+  if (text == NULL) {
+    sqlite3_result_error_nomem(ctx);
+    bdestroy(ret);
+    return;
+  }
+  int err = 0;
+  err = md_html(
+      (const MD_CHAR *)text,
+      strlen((const char *)text),
+      bstring_append,
+      ret,
+      0,
+      0);
+  if (err != 0) {
+    sqlite3_result_error_nomem(ctx);
+    bdestroy(ret);
+    return;
+  }
+  const char *ret_text = (char *)bdata(ret);
+  const int length = blength(ret);
+  free(ret);
+  sqlite3_result_text(ctx, ret_text, length, free);
+}
+
+static void
+sqlite3_html_escape(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+  assert(argc == 1);
+  bstring ret = bfromcstr("");
+  if (ret == NULL) {
+    sqlite3_result_error_nomem(ctx);
+    return;
+  }
+  const unsigned char *text = sqlite3_value_text(argv[0]);
+  if (text == NULL) {
+    sqlite3_result_error_nomem(ctx);
+    bdestroy(ret);
+    return;
+  }
+  int err = 0;
+  for (size_t i = 0; text[i] != '\0'; i++) {
+    switch (text[i]) {
+    case '"':
+      err = bcatcstr(ret, "&quot;");
+      break;
+    case '&':
+      err = bcatcstr(ret, "&amp;");
+      break;
+    case '\'':
+      err = bcatcstr(ret, "&#39;");
+      break;
+    case '<':
+      err = bcatcstr(ret, "&lt;");
+      break;
+    case '>':
+      err = bcatcstr(ret, "&gt;");
+      break;
+    default:
+      err = bconchar(ret, text[i]);
+    }
+    if (err != BSTR_OK) {
+      bdestroy(ret);
+      sqlite3_result_error_nomem(ctx);
+      return;
+    }
+  }
+  const char *ret_text = (char *)bdata(ret);
+  const int length = blength(ret);
+  free(ret);
+  sqlite3_result_text(ctx, ret_text, length, free);
+}
+
 static DBWHandler *sqlite3_connect(const bstring filename, int *err) {
   DBWHandler *h = NULL;
   sqlite3 *db = NULL;
@@ -1275,6 +1427,31 @@ static DBWHandler *sqlite3_connect(const bstring filename, int *err) {
    * rc = sqlite3_load_extension(db, "./extension-functions", NULL,
    * &err_str); CHECK(rc == 0, "Couldn't load extensions: %s", err_str);
    */
+  CHECK(
+      sqlite3_create_function_v2(
+          db,
+          "html_escape",
+          1,
+          SQLITE_UTF8,
+          NULL,
+          sqlite3_html_escape,
+          NULL,
+          NULL,
+          NULL) == SQLITE_OK,
+      "Couldn't define html_escape function");
+
+  CHECK(
+      sqlite3_create_function_v2(
+          db,
+          "md2html",
+          1,
+          SQLITE_UTF8,
+          NULL,
+          sqlite3_md2html,
+          NULL,
+          NULL,
+          NULL) == SQLITE_OK,
+      "Couldn't define md2html function");
 
   h->conn = db;
   if (err != NULL) {
@@ -1687,6 +1864,24 @@ sqlite_int64 dbw_register_file(
     int *err) {
   if (h->DBWDBType == DBW_SQLITE3)
     return sqlite3_register_file(h, filename, location, tags, err);
+  else {
+    if (err != NULL) {
+      *err = DBW_ERR_UNKN_DB;
+    }
+    return -1;
+  }
+
+error:
+  if (err != NULL) {
+    *err = DBW_ERR;
+  }
+  return -1;
+}
+
+sqlite_int64 dbw_path_descend(
+    DBWHandler *h, bstring path, enum DBWError *err) {
+  if (h->DBWDBType == DBW_SQLITE3)
+    return sqlite3_path_descend(h, path, err);
   else {
     if (err != NULL) {
       *err = DBW_ERR_UNKN_DB;

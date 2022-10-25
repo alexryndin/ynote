@@ -5,6 +5,13 @@
 #include <rvec.h>
 #include <sqlite3.h>
 
+#define SNIPPETS_TABLE        "snippets"
+#define SNIPPET_TYPES_TABLE   "snippet_types"
+#define TAGS_TABLE            "tags"
+#define SNIPPET_TO_TAGS_TABLE "snippet_to_tags"
+#define FILES_TABLE           "files"
+#define FILES_TO_TAGS_TABLE   "files_to_tags"
+
 static struct tagbstring s_true = bsStatic("true");
 
 static const struct tagbstring status_ok = bsStatic("{\"status\": \"ok\"}");
@@ -22,7 +29,7 @@ static const struct tagbstring status_couldnt_stat =
     bsStatic("{\"status\": \"error\", \"msg\": \"couldn't stat file\"}");
 
 static const struct tagbstring status_wrong_file_type =
-    bsStatic("{\"status\": \"error\", \"msg\": \"wrong file typ\"}");
+    bsStatic("{\"status\": \"error\", \"msg\": \"wrong file type\"}");
 
 static const struct tagbstring status_server_error =
     bsStatic("{\"status\": \"error\", \"msg\": \"server error\"}");
@@ -42,26 +49,26 @@ static const struct tagbstring status_not_implemented =
 static const struct tagbstring status_snippet_not_found =
     bsStatic("{\"status\": \"error\", \"msg\": \"snippet not found\"}");
 
-#define JSON_GET_ITEM(json, obj, index)                                       \
-  do {                                                                        \
-                                                                              \
-    json_value *ret = NULL;                                                   \
-    if ((json) == NULL) {                                                     \
-      obj = NULL;                                                             \
-      break;                                                                  \
-    }                                                                         \
-    if (json->type != json_object) {                                          \
-      obj = NULL;                                                             \
-      break;                                                                  \
-    }                                                                         \
-                                                                              \
-    for (unsigned int i = 0; i < json->u.object.length; ++i) {                \
-      if (!strcmp(json->u.object.values[i].name, index)) {                    \
-        ret = (json->u).object.values[i].value;                               \
-        break;                                                                \
-      }                                                                       \
-    }                                                                         \
-    obj = ret;                                                                \
+#define JSON_GET_ITEM(json, obj, index)                        \
+  do {                                                         \
+                                                               \
+    json_value *ret = NULL;                                    \
+    if ((json) == NULL) {                                      \
+      obj = NULL;                                              \
+      break;                                                   \
+    }                                                          \
+    if (json->type != json_object) {                           \
+      obj = NULL;                                              \
+      break;                                                   \
+    }                                                          \
+                                                               \
+    for (unsigned int i = 0; i < json->u.object.length; ++i) { \
+      if (!strcmp(json->u.object.values[i].name, index)) {     \
+        ret = (json->u).object.values[i].value;                \
+        break;                                                 \
+      }                                                        \
+    }                                                          \
+    obj = ret;                                                 \
   } while (0)
 
 typedef enum DBWType {
@@ -159,3 +166,5 @@ bstring json_api_find_snippets(
 
 bstring json_api_get_snippet(
     struct DBWHandler *db_handle, sqlite_int64 id, int render, int *ec);
+sqlite_int64 dbw_path_descend(
+    DBWHandler *h, bstring path, enum DBWError *err);
