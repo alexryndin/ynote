@@ -33,7 +33,7 @@
 
 static const struct tagbstring _insert_snippet_sql =
     bsStatic("INSERT INTO " SNIPPETS_TABLE
-             " (title, content, type) VALUES (?, ?, ?) RETURNING id");
+             " (title, content, type, dir) VALUES (?, ?, ?, ?) RETURNING id");
 
 static const struct tagbstring _insert_file_sql = bsStatic(
     "INSERT INTO " FILES_TABLE " (name, location) VALUES (?, ?) RETURNING id");
@@ -322,12 +322,14 @@ bstring json_api_create_snippet(
   struct tagbstring title = {0};
   struct tagbstring content = {0};
   struct tagbstring type = {0};
+  struct tagbstring path = {0};
 
-  json_value *jtitle = NULL, *jcontent = NULL, *jtype = NULL;
+  json_value *jtitle = NULL, *jcontent = NULL, *jtype = NULL, *jpath = NULL;
 
   JSON_GET_ITEM(json, jtitle, "title");
   JSON_GET_ITEM(json, jcontent, "content");
   JSON_GET_ITEM(json, jtype, "type");
+  JSON_GET_ITEM(json, jpath, "path");
 
 // In this macro we check that json values we got above are strings
 // and that they are not NULL if we are creating snippet (not editing)
@@ -355,6 +357,9 @@ bstring json_api_create_snippet(
   CHECK_J(title, edit);
   CHECK_J(content, edit);
   CHECK_J(type, edit);
+  CHECK_J(path, 1); /* 1 because we don't change path on edit, so we */
+                    /* can ignore it if it is not present in json */
+
   LOG_DEBUG("type is %s", bdata(&type));
   LOG_DEBUG("title is %s", bdata(&title));
 
@@ -382,12 +387,25 @@ bstring json_api_create_snippet(
     }
   }
 
+  sqlite_int64 dir = 1;
+  if (!edit && bdata(&path) != NULL) {
+    dir = dbw_path_descend(db_handle, &path, &err);
+    if (err == DBW_ERR_NOT_FOUND) {
+      ret = bfromcstr("{\"status\": \"error\", \"msg\": \"path not found\"");
+      goto error_403;
+    }
+    if (err != DBW_OK) {
+      ret = bfromcstr("{\"status\": \"error\", \"msg\": \"server error\"}");
+      goto error;
+    }
+  }
+
   if (edit) {
     snippet_id = dbw_edit_snippet(
         db_handle, snippet_id, &title, &content, &type, &tags, 0, &err);
   } else {
     snippet_id =
-        dbw_new_snippet(db_handle, &title, &content, &type, &tags, &err);
+        dbw_new_snippet(db_handle, &title, &content, &type, &tags, dir, &err);
   }
   if (err == DBW_ERR_NOT_FOUND) {
     ret = bfromcstr("{\"status\": \"error\", \"msg\": \"wrong type\"");
@@ -464,9 +482,8 @@ sqlite3_path_descend(DBWHandler *h, bstring path, enum DBWError *ret_err) {
         sqlite3_bind_int64(stmt, 1, ret) == SQLITE_OK,
         "Couldn't bind parameter to statement");
     CHECK(
-        sqlite3_bind_text(stmt, 2, bdata(&split_path->a[i]),
-              -1,
-              NULL) == SQLITE_OK,
+        sqlite3_bind_text(stmt, 2, bdata(&split_path->a[i]), -1, NULL) ==
+            SQLITE_OK,
         "Couldn't bind parameter to statement");
     err = sqlite3_step(stmt);
     switch (err) {
@@ -478,6 +495,7 @@ sqlite3_path_descend(DBWHandler *h, bstring path, enum DBWError *ret_err) {
       break;
     case SQLITE_ROW:
       ret = sqlite3_column_int64(stmt, 0);
+      break;
     default:
       LOG_ERR("Couldn't get row from table: %s", sqlite3_errmsg(h->conn));
       goto error;
@@ -827,9 +845,10 @@ static enum DBWError sqlite3_unbind_tags(
 
   if (rv_len(*tags) > 0) {
     CHECK(
-        (q = bformat("DELETE FROM %s WHERE snippet_id = ? AND tag_id NOT IN "
-                     "(SELECT id "
-                     "FROM " TAGS_TABLE " WHERE name IN (")) != NULL,
+        (q = bfromcstr("DELETE FROM " SNIPPET_TO_TAGS_TABLE
+                       " WHERE snippet_id = ? AND tag_id NOT IN "
+                       "(SELECT id "
+                       "FROM " TAGS_TABLE " WHERE name IN (")) != NULL,
         "Couldn't create query string");
     STR_APPEND_PATTERN(q, "?,", rv_len(*tags));
     CHECK(bcatcstr(q, "))") == BSTR_OK, "Couldn't create query string");
@@ -1118,6 +1137,7 @@ static sqlite3_int64 sqlite3_new_snippet(
     const bstring snippet,
     const bstring type,
     const bstrListEmb *tags,
+    const sqlite3_int64 dir,
     int *ret_err) {
   int err = 0;
   sqlite3_int64 ret = 0;
@@ -1185,6 +1205,10 @@ static sqlite3_int64 sqlite3_new_snippet(
 
   CHECK(
       sqlite3_bind_int64(stmt, 3, type_id) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
+  CHECK(
+      sqlite3_bind_int64(stmt, 4, dir) == SQLITE_OK,
       "Couldn't bind parameter to statement");
 
   err = sqlite3_step(stmt);
@@ -1741,6 +1765,7 @@ sqlite_int64 dbw_new_snippet(
     const bstring snippet,
     const bstring type,
     const bstrListEmb *tags,
+    sqlite_int64 dir,
     int *err) {
 
   CHECK(title != NULL && bdata(title) != NULL, "Null title");
@@ -1763,7 +1788,7 @@ sqlite_int64 dbw_new_snippet(
   CHECK(bdata(type)[blength(type)] == '\0', "String must be nul terminated");
 
   if (h->DBWDBType == DBW_SQLITE3)
-    return sqlite3_new_snippet(h, title, snippet, type, tags, err);
+    return sqlite3_new_snippet(h, title, snippet, type, tags, dir, err);
 
   return DBW_ERR_UNKN_DB;
 error:
@@ -1878,8 +1903,7 @@ error:
   return -1;
 }
 
-sqlite_int64 dbw_path_descend(
-    DBWHandler *h, bstring path, enum DBWError *err) {
+sqlite_int64 dbw_path_descend(DBWHandler *h, bstring path, enum DBWError *err) {
   if (h->DBWDBType == DBW_SQLITE3)
     return sqlite3_path_descend(h, path, err);
   else {

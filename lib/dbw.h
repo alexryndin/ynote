@@ -1,3 +1,6 @@
+#ifndef _DBW_H_
+#define _DBW_H_
+
 #include <bbstrlib.h>
 #include <bstrlib.h>
 #include <json.h>
@@ -121,6 +124,7 @@ sqlite_int64 dbw_new_snippet(
     const bstring snippet,
     const bstring type,
     const bstrListEmb *tags,
+    sqlite_int64 dir,
     int *err);
 
 bstring dbw_find_snippets(
@@ -168,3 +172,5 @@ bstring json_api_get_snippet(
     struct DBWHandler *db_handle, sqlite_int64 id, int render, int *ec);
 sqlite_int64 dbw_path_descend(
     DBWHandler *h, bstring path, enum DBWError *err);
+
+#endif
