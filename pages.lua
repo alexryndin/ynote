@@ -4,14 +4,14 @@ local string = require "string"
 pages = {}
 
 local snippet = tags(function(p)
-  _edit = p["edit"]
-  _content = p["content"]
-  _type = p["_type"]
-  _tags = p["tags"]
-  _title = p["title"]
-  _id = p["id"]
-  _path = p["path"]
-  _new = p["new"]
+  local _edit = p["edit"]
+  local _content = p["content"]
+  local _type = p["_type"]
+  local _tags = p["tags"]
+  local _title = p["title"]
+  local _id = p["id"]
+  local _path = p["path"]
+  local _new = p["new"]
 
   print("id is ", _id)
 
@@ -56,8 +56,27 @@ tags = %s
 
 end)
 
+function pages.menu_bar(p)
+  local edit = p["edit"]
+  local new = p["new"]
+  local path = p["path"]
+  local id = p["id"]
+  print("create is ", create)
+  ret = {}
+  table.insert(ret, [[<nav class="header-crumbs"><strong><span class="muted">❯</span> Y <span class="muted">·</span> ]])
+  if edit then
+    table.insert(ret, string.format([[<a rel="noopener noreferrer" href="/lua/get_snippet/%d?edit=true">edit</a> <span class="muted">·</span> ]], id))
+  end
+  if new then
+    table.insert(ret, string.format([[<a rel="noopener noreferrer" href="/api/create_snippet?path=%s">new</a> <span class="muted">·</span> ]], path))
+  end
+
+  table.insert(ret, [[</strong></nav>]])
+  return table.concat(ret, "")
+end
 
 local snippet_view = tags(function(p)
+  print("nav is ", nav, edit, new)
   return html (
     head (
         meta { charset = "utf-8" },
@@ -65,6 +84,10 @@ local snippet_view = tags(function(p)
         link {rel = "stylesheet", href = "/static/css/nb.css"}
     ),
     body (
+      unsafe(pages.menu_bar {
+        ["edit"] = not p["edit"] and not p["new"],
+        ["id"] = p["id"]
+      }),
       div {class = "main"} (
         h1 (p["title"]),
         snippet(p)

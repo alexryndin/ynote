@@ -46,7 +46,7 @@ void ConnInfo_destroy(struct ConnInfo *ci) {
 }
 
 struct ConnInfo *ConnInfo_create(
-    enum ConnInfoType ct,
+    enum ConnInfoType cit,
     enum HTTPServerMethodName method_name,
     const char *method_str,
     enum HTTPServerCallName call_name,
@@ -63,7 +63,6 @@ struct ConnInfo *ConnInfo_create(
   ci->method_name = method_name;
   ci->method_str = method_str;
 
-  ci->type = ct;
   ci->url = url;
 
   header_str =
@@ -111,24 +110,26 @@ struct ConnInfo *ConnInfo_create(
   }
   if (method_name == HTTP_METHOD_POST) {
     if (call_name == RESTAPI_UPLOAD) {
-      ct = CIT_POST_UPLOAD_FORM;
+      cit = CIT_POST_UPLOAD_FORM;
     } else if (
         call_name == RESTAPI_CREATE_SNIPPET &&
-        ct == HTTP_CONTENT_MULTIPART_FORM_DATA) {
-      ct = CIT_POST_SNIPPET_FORM;
+        cit == HTTP_CONTENT_MULTIPART_FORM_DATA) {
+      cit = CIT_POST_SNIPPET_FORM;
     } else {
-      ct = CIT_POST_RAW;
+      cit = CIT_POST_RAW;
     }
   } else {
-    ct = CIT_OTHER;
+    cit = CIT_OTHER;
   }
-  if (ct == CIT_POST_RAW) {
+  if (cit == CIT_POST_RAW) {
     CHECK((ci->userp = bfromcstr("")) != NULL, "Couldn't create con_cls");
-  } else if (ct == CIT_POST_UPLOAD_FORM) {
+  } else if (cit == CIT_POST_UPLOAD_FORM) {
     CHECK(
         (ci->userp = calloc(1, sizeof(UploadFilesVec))) != NULL,
         "Couldn't create con_cls");
   }
+
+  ci->type = cit;
 
 exit:
   if (split_header_line != NULL) {

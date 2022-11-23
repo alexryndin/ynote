@@ -1,5 +1,6 @@
 local tags = require "luahttp/tags"
 local string = require "string"
+local pages = require "pages"
 
 function string.startswith(String,Start)
    return string.sub(String,1,string.len(Start))==Start
@@ -76,15 +77,26 @@ return function (ud)
               link {rel = "stylesheet", href = "/static/css/nb.css"}
           ),
           body (
-            nav { class = "header-crumbs" } (
-              strong (
-                a {
-                  rel = "noopener noreferrer",
-                  href = "/api/create_snippet?path=" .. path
-                } "+"
-              )
-            ),
+            unsafe(pages.menu_bar {["new"] = true, ["path"] = path}),
             div {class = "main"} (
+              form {
+                id = "search",
+                ["accept-charset"] = "UTF-8",
+                action = "/command",
+                method = "post"
+              } (
+                input {
+                  id = "search-input",
+                  placeholder = "command"
+                },
+                input {
+                  ["type"] = "hidden",
+                  name = "path",
+                  value = path
+                }
+              ),
+
+
               snippets(ud)
             )
           )

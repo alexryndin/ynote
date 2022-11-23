@@ -36,7 +36,7 @@ static const char *const getUpdatesUrl =
     "https://api.telegram.org/bot%s/getUpdates?timeout=%d&offset=%d";
 
 static const char *const sendMessagelUrl =
-    "https://api.telegram.org/bot%s/sendMessage?chat_id=%d&text=%s";
+    "https://api.telegram.org/bot%s/sendMessage?chat_id=%lld&text=%s";
 
 #define HTML_BFORMATA(B, M, ...)                      \
   do {                                                \
@@ -128,18 +128,36 @@ static const char *const sendMessagelUrl =
     }                                            \
   } while (0);
 
+#define LUA_CONF_READ_BOOL(dst, src, _default) \
+  do {                                         \
+    switch (lua_getglobal((app->lua), #src)) { \
+    case LUA_TNIL:                             \
+      (dst) = (_default);                      \
+      break;                                   \
+    case LUA_TBOOLEAN:                         \
+      (dst) = lua_toboolean(app->lua, -1);     \
+      break;                                   \
+    default:                                   \
+      LOG_ERR(#src " must be a number");       \
+      goto error;                              \
+    }                                          \
+  } while (0);
+
 enum TgState {
   TGS_ROOT,
   TGS_GET_BY_ID,
 };
+
 struct User {
   uint id;
   char allowed;
   enum TgState tg_state;
 };
 
+typedef rvec_t(struct User) Users;
+
 struct UsersInfo {
-  struct User u;
+  Users users;
 };
 
 struct YNoteApp {
@@ -167,7 +185,7 @@ DBWHandler *ynote_get_db_handle(struct LuaCtx *luactx) {
 }
 
 static int ynote_lua_check_and_execute_file(
-    struct MHD_Connection *conn, struct ConnInfo *ci, bstring path);
+    struct MHD_Connection *conn, struct ConnInfo *ci, const char *path);
 
 static int parse_cli_options(struct YNoteApp *app, int argc, char *argv[]) {
   int ret = 0;
@@ -199,8 +217,11 @@ static void bdestroy_silent(bstring s) { bdestroy(s); }
 
 static struct User *get_user(struct UsersInfo *ui, unsigned id) {
   CHECK(ui != NULL, "Null UsersInfo");
-  if (id == ui->u.id)
-    return &ui->u;
+  for (size_t i = 0; i < ui->users.n; i++) {
+    if (id == rv_get(ui->users, i, NULL)->id) {
+      return rv_get(ui->users, i, NULL);
+    }
+  }
 error:
   return NULL;
 }
@@ -213,11 +234,12 @@ static int http_client_add_req(
     void *data);
 
 static int http_client_send_msg_req(
-    struct YNoteApp *app, unsigned chat_id, bstring msg, char escape_msg);
+    struct YNoteApp *app, long long chat_id, bstring msg, char escape_msg);
 
 static int http_client_get_updates_req(struct YNoteApp *app);
 
-static int tg_answer_snippet(struct YNoteApp *app, bstring str_id, int to) {
+static int
+tg_answer_snippet(struct YNoteApp *app, bstring str_id, long long to) {
   int rc = 0;
   int err = 0;
   struct tagbstring static_msg = {0};
@@ -238,6 +260,8 @@ static int tg_answer_snippet(struct YNoteApp *app, bstring str_id, int to) {
   PARSE_INT(strtoll, bdatae(str_id, ""), id, err);
   if (err != 0) {
     static_msg = (struct tagbstring)bsStatic("Couldn't parse int");
+    rc = -1;
+    goto error;
   } else {
     json_str = dbw_get_snippet(app->db_handle, id, &err);
     switch (err) {
@@ -364,7 +388,7 @@ http_client_process_res(struct YNoteApp *app, struct HTTPReqInfo *req) {
 
     if (json_tmp->u.array.length > 0) {
       int update_id = 0;
-      int from_id = 0;
+      long long from_id = 0;
       struct tagbstring text = {0};
       char *name = NULL;
       char *lastname = NULL;
@@ -412,20 +436,22 @@ http_client_process_res(struct YNoteApp *app, struct HTTPReqInfo *req) {
         from_id = json_tmp->u.integer;
 
         JSON_GET_ITEM(json_from, json_tmp, "first_name");
-        CHECK(
-            json_tmp != NULL && json_tmp->type == json_string, "Bad response");
-        name = json_tmp->u.string.ptr;
+        if (json_tmp != NULL) {
+          CHECK(json_tmp->type == json_string, "Bad response");
+          name = json_tmp->u.string.ptr;
+        };
 
         JSON_GET_ITEM(json_from, json_tmp, "last_name");
-        CHECK(
-            json_tmp != NULL && json_tmp->type == json_string, "Bad response");
-        lastname = json_tmp->u.string.ptr;
+        if (json_tmp != NULL) {
+          CHECK(json_tmp->type == json_string, "Bad response");
+          lastname = json_tmp->u.string.ptr;
+        };
 
         JSON_GET_ITEM(json_from, json_tmp, "is_bot");
         CHECK(
             json_tmp != NULL && json_tmp->type == json_boolean, "Bad response");
         LOG_DEBUG(
-            "%s %s %s (id %d) wrote %s",
+            "%s %s %s (id %lld) wrote %s",
             json_tmp->u.boolean ? "Bot" : "Human",
             name,
             lastname,
@@ -778,7 +804,7 @@ static int http_client_get_updates_req(struct YNoteApp *app) {
 }
 
 static int http_client_send_msg_req(
-    struct YNoteApp *app, unsigned chat_id, bstring msg, char escape_msg) {
+    struct YNoteApp *app, long long chat_id, bstring msg, char escape_msg) {
   CURL *easy = NULL;
   char *encoded_msg = NULL;
 
@@ -927,15 +953,26 @@ static int read_config(struct YNoteApp *app, bstring path) {
   LUA_CONF_READ_STRING(app->dbpath, dbpath);
 
   LUA_CONF_READ_NUMBER(app->client_timeout, client_timeout, 30);
+  LUA_CONF_READ_BOOL(app->tg_bot_enabled, tg_bot_enabled, 1);
+
   LUA_CONF_READ_NUMBER(app->port, port, 8080);
 
   CHECK(app->port > 0 && app->port < 65535, "Wrong port number");
 
   rc = 0;
 
-  app->users_info.u.id = 332994181;
-  app->users_info.u.allowed = 1;
-  // fallthrough
+  rv_init(app->users_info.users);
+  rv_push(
+      app->users_info.users,
+      ((struct User){.id = 332994181, .allowed = 1}),
+      NULL);
+  rv_push(
+      app->users_info.users,
+      ((struct User){.id = 5793397922, .allowed = 1}),
+      NULL);
+//  info.u.id = 332994181;
+//  app->users_info.u.allowed = 1;
+// fallthrough
 exit:
   if (conf != NULL) {
     fclose(conf);
@@ -1461,18 +1498,48 @@ error:
   goto exit;
 }
 
-static enum MHD_Result mhd_api_handle_create_snippet(
+static enum MHD_Result collect_raw_data(
+    struct ConnInfo *ci,
+    int *ret,
+    const char *upload_data,
+    size_t *upload_data_size) {
+
+  bstring body = (bstring)ci->userp;
+  if (ci->invocations == 1) {
+    *ret = MHD_YES;
+    goto exit;
+  }
+  if (*upload_data_size != 0) {
+    if (blength(&ci->error) > 0) {
+      // skip data if we have error
+      *upload_data_size = 0;
+      *ret = MHD_YES;
+      goto exit;
+    }
+    if (bcatblk(body, upload_data, *upload_data_size) != BSTR_OK) {
+      LOG_ERR("Couldn't read body");
+      ci->error = status_server_error;
+      *upload_data_size = 0;
+      *ret = MHD_YES;
+      goto exit;
+    }
+    *upload_data_size = 0;
+    *ret = MHD_YES;
+    goto exit;
+  }
+  return 0;
+exit:
+  return 1;
+}
+
+static enum MHD_Result mhd_api_handle_lua_with_post(
     struct MHD_Connection *connection,
     struct ConnInfo *ci,
     const char *upload_data,
-    size_t *upload_data_size) {
+    size_t *upload_data_size,
+    const char *script) {
   struct MHD_Response *response = NULL;
-  bstrListEmb *split_header_line = NULL;
   int ret = MHD_NO;
-  int rc = 0;
-  int multipart = 0;
-  const char *edit_str = NULL;
-  const char *header_str = NULL;
   bstring resp_str = NULL;
   lua_State *lua = ci->app->lua;
   int status = 200;
@@ -1480,26 +1547,7 @@ static enum MHD_Result mhd_api_handle_create_snippet(
 
   switch (ci->method_name) {
   case HTTP_METHOD_POST:
-    if (ci->invocations == 1) {
-      ret = MHD_YES;
-      goto exit;
-    }
-    if (*upload_data_size != 0) {
-      if (blength(&ci->error) > 0) {
-        // skip data if we have error
-        *upload_data_size = 0;
-        ret = MHD_YES;
-        goto exit;
-      }
-      if (bcatblk(body, upload_data, *upload_data_size) != BSTR_OK) {
-        LOG_ERR("Couldn't read body");
-        ci->error = status_server_error;
-        *upload_data_size = 0;
-        ret = MHD_YES;
-        goto exit;
-      }
-      *upload_data_size = 0;
-      ret = MHD_YES;
+    if (collect_raw_data(ci, &ret, upload_data, upload_data_size)) {
       goto exit;
     } else {
       if (blength(&ci->error) > 0) {
@@ -1518,8 +1566,7 @@ static enum MHD_Result mhd_api_handle_create_snippet(
         status_method_not_allowed,
         ret);
   }
-  status = ynote_lua_check_and_execute_file(
-      connection, ci, &BSS("luahttp/create_snippet.lua"));
+  status = ynote_lua_check_and_execute_file(connection, ci, script);
 
   switch (status) {
   case -1:
@@ -1536,9 +1583,6 @@ static enum MHD_Result mhd_api_handle_create_snippet(
       connection, status, response, resp_str, ret, "text/html");
 
 exit:
-  if (split_header_line != NULL) {
-    bstrListEmb_destroy(split_header_line);
-  }
   return ret;
 error:
   ret = MHD_NO;
@@ -2197,7 +2241,7 @@ struct LDBWCtx *ynote_get_ldbwctx(struct LuaCtx *lc) {
 }
 
 static int ynote_lua_check_and_execute_file(
-    struct MHD_Connection *conn, struct ConnInfo *ci, bstring path) {
+    struct MHD_Connection *conn, struct ConnInfo *ci, const char *path) {
   int status = 200;
   lua_State *lua = ci->app->lua;
   struct LuaCtx luactx = {0};
@@ -2207,11 +2251,11 @@ static int ynote_lua_check_and_execute_file(
   ldbwctx = LDBWCtx_create();
   CHECK(ldbwctx != NULL, "Couldn't create database context");
 
-  if (stat(bdatae(path, ""), &filestat) != 0) {
+  if (stat(path, &filestat) != 0) {
     if (errno == ENOENT) {
       return -1;
     }
-    LOG_ERR("Couldn't stat file %s", bdatae(path, ""));
+    LOG_ERR("Couldn't stat file %s", path);
     return -2;
   }
 
@@ -2219,7 +2263,7 @@ static int ynote_lua_check_and_execute_file(
     return -1;
   }
 
-  CHECK(luaL_loadfile(lua, bdata(path)) == 0, "Couldn't load lua file");
+  CHECK(luaL_loadfile(lua, path) == 0, "Couldn't load lua file");
   CHECK(
       lua_pcall(lua, 0, 1, 0) == 0,
       "Couldn't execute lua file: %s",
@@ -2295,7 +2339,7 @@ static enum MHD_Result mhd_handle_lua(
     path = bformat("luahttp/%s", "index.lua");
   }
   CHECK(path != NULL, "Null path");
-  status = ynote_lua_check_and_execute_file(connection, ci, path);
+  status = ynote_lua_check_and_execute_file(connection, ci, bdata(path));
 
   switch (status) {
   case -1:
@@ -2346,7 +2390,9 @@ static int mhd_handler(
     enum HTTPServerCallName call_name;
     enum HTTPServerMethodName method_name;
 
-    if (!strcmp(url, "/api/get_snippet")) {
+    if (!strcmp(url, "/command")) {
+      call_name = RESTAPI_COMMAND;
+    } else if (!strcmp(url, "/api/get_snippet")) {
       call_name = RESTAPI_GET_SNIPPET;
     } else if (!strcmp(url, "/api/create_snippet")) {
       call_name = RESTAPI_CREATE_SNIPPET;
@@ -2356,17 +2402,13 @@ static int mhd_handler(
       call_name = RESTAPI_DELETE_SNIPPET;
     } else if (!strcmp(url, "/api/upload")) {
       call_name = RESTAPI_UPLOAD;
-    } else if (!strncmp(url, "/static/", strlen("/static/"))) {
+    } else if (strstartswith(url, "/static/")) {
       call_name = RESTAPI_STATIC;
-    } else if (!strncmp(url, "/get_snippet/", strlen("/get_snippet/"))) {
+    } else if (strstartswith(url, "/get_snippet/")) {
       call_name = HTTP_PATH_GET_SNIPPET;
-    } else if (
-        !strncmp(url, "/root", strlen("/root")) ||
-        !strncmp(url, "/root/", strlen("/root/"))) {
+    } else if (!strcmp(url, "/root") || strstartswith(url, "/root/")) {
       call_name = HTTP_PATH_INDEX;
-    } else if (
-        !strncmp(url, "/lua", strlen("/lua")) ||
-        !strncmp(url, "/lua/", strlen("/lua/"))) {
+    } else if (!strcmp(url, "/lua") || strstartswith(url, "/lua/")) {
       call_name = HTTP_PATH_LUA;
     } else {
       call_name = RESTAPI_UNKNOWN;
@@ -2395,6 +2437,10 @@ static int mhd_handler(
   ci->invocations++;
 
   switch (ci->api_call_name) {
+  case RESTAPI_COMMAND:
+    ret = mhd_api_handle_lua_with_post(
+        connection, ci, upload_data, upload_data_size, "luahttp/command.lua");
+    goto exit;
   case RESTAPI_GET_SNIPPET:
     ret = mhd_api_handle_get_snippet(connection, ci);
     goto exit;
@@ -2402,8 +2448,12 @@ static int mhd_handler(
     ret = mhd_handle_get_snippet(connection, ci);
     goto exit;
   case RESTAPI_CREATE_SNIPPET:
-    ret = mhd_api_handle_create_snippet(
-        connection, ci, upload_data, upload_data_size);
+    ret = mhd_api_handle_lua_with_post(
+        connection,
+        ci,
+        upload_data,
+        upload_data_size,
+        "luahttp/create_snippet.lua");
     goto exit;
   case RESTAPI_FIND_SNIPPETS:
     ret = mhd_api_handle_find_snippets(connection, ci);

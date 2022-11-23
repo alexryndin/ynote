@@ -17,7 +17,6 @@ void LDBWCtx_destroy(struct LDBWCtx *ldbwctx) {
       sqlite3_finalize(ldbwctx->stmt);
       ldbwctx->stmt = NULL;
     }
-
     free(ldbwctx);
   }
 }
@@ -334,7 +333,7 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
 
   sqlite_int64 id = lua_tointeger(lua, 2);
   int edit = lua_toboolean(lua, 3);
-  const char * path = lua_tostring(lua, 4);
+  const char *path = lua_tostring(lua, 4);
   struct tagbstring tbpath = {0};
   btfromcstr(tbpath, path);
 
@@ -388,20 +387,20 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
         tagslist = bsplit_noalloc(tags, ',');
         CHECK(tagslist != NULL, "Couldn't split tags");
       }
-    sqlite_int64 dir = 1;
-    dir = dbw_path_descend(db, &tbpath, &err);
-    if (err == DBW_ERR_NOT_FOUND) {
-    lua_pushnil(lua);
-    lua_pushstring(lua, "path not found");
-    ret = 2;
-      goto error;
-    }
-    if (err != DBW_OK) {
-    lua_pushnil(lua);
-    lua_pushstring(lua, "server error");
-    ret = 2;
-      goto error;
-    }
+      sqlite_int64 dir = 1;
+      dir = dbw_path_descend(db, &tbpath, &err);
+      if (err == DBW_ERR_NOT_FOUND) {
+        lua_pushnil(lua);
+        lua_pushstring(lua, "path not found");
+        ret = 2;
+        goto error;
+      }
+      if (err != DBW_OK) {
+        lua_pushnil(lua);
+        lua_pushstring(lua, "server error");
+        ret = 2;
+        goto error;
+      }
 
       if (edit) {
         id = dbw_edit_snippet(db, id, title, &body, type, tagslist, 0, &err);
