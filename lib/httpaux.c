@@ -200,8 +200,12 @@ static int l_get_body(lua_State *lua) {
   luaL_checktype(lua, 1, LUA_TLIGHTUSERDATA);
   struct ConnInfo *ci =
       ynote_get_conn_info((struct LuaCtx *)lua_touserdata(lua, 1));
-  lua_pushstring(lua, ci->url);
-  return 1;
+  if (ci->ct != CIT_POST_RAW || bdata((bstring)ci->userp) == NULL) {
+    lua_pushnil(lua);
+    ret = 1;
+  }
+  lua_pushstring(lua, bdata((bstring)ci->userp));
+  ret = 1;
 exit:
   return ret;
 error:
@@ -213,6 +217,7 @@ static const struct luaL_Reg httpaux[] = {
     {"get_query", l_get_query},
     {"get_method", l_get_method},
     {"get_port", l_get_port},
+    {"get_body", l_get_body},
     {NULL, NULL}};
 
 void register_httpauxlib(lua_State *lua) {

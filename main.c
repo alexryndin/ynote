@@ -1527,6 +1527,16 @@ static enum MHD_Result collect_raw_data(
     *ret = MHD_YES;
     goto exit;
   }
+  if (bfindreplace(
+          ci->userp,
+          &(struct tagbstring)bsStatic("\r\n"),
+          &(struct tagbstring)bsStatic("\n"),
+          0) != BSTR_OK) {
+    LOG_ERR("Couldn't replace string");
+    ci->error = status_server_error;
+    *ret = MHD_YES;
+    goto exit;
+  }
   return 0;
 exit:
   return 1;
@@ -1552,7 +1562,11 @@ static enum MHD_Result mhd_api_handle_lua_with_post(
     } else {
       if (blength(&ci->error) > 0) {
         MHD_RESPONSE_WITH_TAGBSTRING(
-            connection, MHD_HTTP_BAD_REQUEST, response, ci->error, ret);
+            connection,
+            MHD_HTTP_INTERNAL_SERVER_ERROR,
+            response,
+            ci->error,
+            ret);
       }
       LOG_DEBUG("got body %s", bdata(body));
     }
@@ -2354,8 +2368,35 @@ static enum MHD_Result mhd_handle_lua(
   resp_str = blk2bstr(lua_tostring(lua, -3), lua_rawlen(lua, -3));
   CHECK(resp_str != NULL, "Couldn't copy body");
 
-  MHD_RESPONSE_WITH_BSTRING_CT(
-      connection, status, response, resp_str, ret, "text/html");
+  // Caution -- here we manually create response, don't use CHECK()
+  // to prevent double response creation and thus memory leakage
+  response = MHD_create_response_from_buffer_with_free_callback_cls(
+      blength(resp_str),
+      bdata(resp_str),
+      (MHD_ContentReaderFreeCallback)bdestroy_silent,
+      resp_str);
+
+  MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, "text/html");
+
+  int table = lua_gettop(lua);
+
+  if (lua_istable(lua, table)) {
+    lua_pushnil(lua);
+    while (lua_next(lua, table) != 0) {
+      if (!lua_isstring(lua, -2)) {
+        continue;
+      }
+      const char *key = lua_tostring(lua, -2);
+      const char *value = lua_tostring(lua, -1);
+      MHD_add_response_header(response, key, value);
+      lua_pop(lua, 1);
+    }
+  }
+
+  ret = MHD_queue_response(connection, status, response);
+  MHD_destroy_response(response);
+  goto exit;
+
 exit:
   lua_settop(lua, 0);
   if (path != NULL) {

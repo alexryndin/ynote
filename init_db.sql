@@ -34,19 +34,15 @@ CREATE TABLE IF NOT EXISTS snippet_to_tags (
 
 CREATE TABLE IF NOT EXISTS dirs (
   id INTEGER NOT NULL PRIMARY KEY,
+  parent_id NOT NULL,
   name TEXT NOT NULL,
   created DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated DATETIME DEFAULT CURRENT_TIMESTAMP
+  updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(parent_id) REFERENCES dirs(id)
+  UNIQUE(id, parent_id)
+  UNIQUE(parent_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS dir_to_dirs (
-  id INTEGER NOT NULL PRIMARY KEY,
-  dir_id NOT NULL,
-  child_id NOT NULL,
-  FOREIGN KEY(dir_id) REFERENCES dirs(id),
-  FOREIGN KEY(child_id) REFERENCES dirs(id)
-  UNIQUE(dir_id, child_id)
-);
 
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER NOT NULL PRIMARY KEY,
@@ -64,6 +60,7 @@ CREATE TABLE IF NOT EXISTS files_to_tags (
   FOREIGN KEY(tag_id) REFERENCES tags(id)
   UNIQUE(file_id, tag_id)
 );
+
 
 INSERT INTO snippet_types (name) VALUES ("bash");
 INSERT INTO snippet_types (name) VALUES ("code");
@@ -92,8 +89,7 @@ INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (1,2);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (2,2);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (4,3);
 
-INSERT INTO dirs(name) VALUES ("root"), ("codes");
-INSERT INTO dir_to_dirs (dir_id, child_id) VALUES (1,2);
+INSERT INTO dirs(id, name, parent_id) VALUES (1, "root", 1), (2, "codes", 1);
 
 COMMIT;
 

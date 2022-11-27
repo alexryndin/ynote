@@ -18,7 +18,7 @@ return function (ud)
       print(err)
       return "server error", 500
     end
-    return pages.get_snippet(ud, id, "")
+    return pages.get_snippet(ud, id, false, "")
   else
     return pages.new_snippet(ud, "", path)
   end

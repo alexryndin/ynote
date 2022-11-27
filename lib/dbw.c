@@ -452,10 +452,9 @@ sqlite3_path_descend(DBWHandler *h, bstring path, enum DBWError *ret_err) {
   sqlite3_stmt *stmt = NULL;
   sqlite_int64 ret = 1;
   int err = 0;
-  struct tagbstring q = bsStatic("select c.id from dirs as a"
-                                 " join dir_to_dirs as b on a.id == b.dir_id"
-                                 " join dirs as c on b.child_id == c.id"
-                                 " where a.id = ? and c.name = ?");
+  struct tagbstring q = bsStatic("select a.id from dirs as a"
+                                 " join dirs as b on b.id == a.parent_id"
+                                 " where b.id = ? and a.name = ?");
 
   CHECK(bdata(path) != NULL, "Null string");
   CHECK(blength(path) > 0 && bdata(path)[0] == '/', "Wrong path");
@@ -482,8 +481,12 @@ sqlite3_path_descend(DBWHandler *h, bstring path, enum DBWError *ret_err) {
         sqlite3_bind_int64(stmt, 1, ret) == SQLITE_OK,
         "Couldn't bind parameter to statement");
     CHECK(
-        sqlite3_bind_text(stmt, 2, bdata(&split_path->a[i]), -1, NULL) ==
-            SQLITE_OK,
+        sqlite3_bind_text(
+            stmt,
+            2,
+            bdata(&split_path->a[i]),
+            blength(&split_path->a[i]),
+            NULL) == SQLITE_OK,
         "Couldn't bind parameter to statement");
     err = sqlite3_step(stmt);
     switch (err) {
@@ -678,7 +681,7 @@ static bstring sqlite3_find_snippets(
               stmt,
               binding_field + 1,
               bdata(rv_get(*tags, binding_field, NULL)),
-              -1,
+              blength(rv_get(*tags, binding_field, NULL)),
               NULL) == SQLITE_OK,
           "Couldn't bind parameter (tag %s) to statement: %s",
           bdata(rv_get(*tags, binding_field, NULL)),
@@ -797,7 +800,11 @@ static enum DBWError sqlite3_bind_tags(
   for (int i = 0; i < rv_len(*tags); i++) {
     CHECK(
         sqlite3_bind_text(
-            stmt, 2 + i, bdata(rv_get(*tags, i, NULL)), -1, NULL) == SQLITE_OK,
+            stmt,
+            2 + i,
+            bdata(rv_get(*tags, i, NULL)),
+            blength(rv_get(*tags, i, NULL)),
+            NULL) == SQLITE_OK,
         "Couldn't bind parameter (tag %s) to statement: %s",
         bdata(rv_get(*tags, i, NULL)),
         sqlite3_errmsg(h->conn));
@@ -869,7 +876,11 @@ static enum DBWError sqlite3_unbind_tags(
   for (int i = 0; i < rv_len(*tags); i++) {
     CHECK(
         sqlite3_bind_text(
-            stmt, 2 + i, bdata(rv_get(*tags, i, NULL)), -1, NULL) == SQLITE_OK,
+            stmt,
+            2 + i,
+            bdata(rv_get(*tags, i, NULL)),
+            blength(rv_get(*tags, i, NULL)),
+            NULL) == SQLITE_OK,
         "Couldn't bind parameter (tag %s) to statement: %s",
         bdata(rv_get(*tags, i, NULL)),
         sqlite3_errmsg(h->conn));
@@ -935,8 +946,11 @@ static enum DBWError sqlite3_ensure_tags(
     for (int i = 0; i < rv_len(*tags); i++) {
       CHECK(
           sqlite3_bind_text(
-              stmt, 1 + i, bdata(rv_get(*tags, i, NULL)), -1, NULL) ==
-              SQLITE_OK,
+              stmt,
+              1 + i,
+              bdata(rv_get(*tags, i, NULL)),
+              blength(rv_get(*tags, i, NULL)),
+              NULL) == SQLITE_OK,
           "Couldn't bind parameter (tag %s) to statement: %s",
           bdata(rv_get(*tags, i, NULL)),
           sqlite3_errmsg(h->conn));
@@ -998,7 +1012,8 @@ static sqlite3_int64 sqlite3_edit_snippet(
         sqlite3_errmsg(h->conn));
 
     CHECK(
-        sqlite3_bind_text(stmt, 1, bdata(type), -1, NULL) == SQLITE_OK,
+        sqlite3_bind_text(stmt, 1, bdata(type), blength(type), NULL) ==
+            SQLITE_OK,
         "Couldn't bind parameter to statement");
 
     CHECKRC(
@@ -1360,7 +1375,7 @@ sqlite3_md2html(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
       strlen((const char *)text),
       bstring_append,
       ret,
-      0,
+      MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS,
       0);
   if (err != 0) {
     sqlite3_result_error_nomem(ctx);

@@ -1,4 +1,4 @@
 return function ()
-   return "test"
+   return "test", 200, {test = "test"}
 end
 

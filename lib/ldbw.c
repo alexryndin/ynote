@@ -135,9 +135,17 @@ static int l_path_descend(lua_State *lua) {
   const char *path = lua_tostring(lua, 2);
   struct tagbstring tbpath = {0};
   btfromcstr(tbpath, path);
-  int dir = dbw_path_descend(db, &tbpath, NULL);
+  int dir = dbw_path_descend(db, &tbpath, &err);
+  if (err != DBW_OK) {
+      lua_pushnil(lua);
+      lua_pushstring(lua, "Couldn't get dir by path");
+      ret = 2;
+      goto exit;
+  }
   lua_pushinteger(lua, dir);
   ret = 1;
+  // fallthrough
+exit:
   return ret;
 }
 static int l_sqlite3_step(lua_State *lua) {
@@ -386,6 +394,9 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
       if (tags != NULL) {
         tagslist = bsplit_noalloc(tags, ',');
         CHECK(tagslist != NULL, "Couldn't split tags");
+      }
+      for (size_t i = 0; i < tagslist->n; i++) {
+        CHECK(tbtrimws(&tagslist->a[i]) == BSTR_OK, "Couldn't trim string");
       }
       sqlite_int64 dir = 1;
       dir = dbw_path_descend(db, &tbpath, &err);
