@@ -522,6 +522,64 @@ error:
   }
   goto exit;
 }
+
+static bstring sqlite3_snippet_path_ascend(
+    DBWHandler *h, sqlite_int64 id, enum DBWError *ret_err) {
+  sqlite3_stmt *stmt = NULL;
+  bstring strret = NULL;
+  int err = 0;
+  struct tagbstring q = bsStatic(
+      "WITH RECURSIVE "
+      "ascend(x, id, name, parent_id) AS ( "
+      "select 1, id, name, parent_id from dirs where id = (select dir from "
+      "snippets where id = ?) "
+      "UNION "
+      "SELECT x+1, dirs.id, dirs.name, dirs.parent_id from dirs, ascend "
+      "where ascend.parent_id = dirs.id and ascend.id != ascend.parent_id "
+      "limit 255 "
+      ") "
+      "select IIF(count(*) > 1, substr(group_concat(name, '/'),5), '/') from (select name from ascend "
+      "order by x desc);");
+
+  CHECK(
+      sqlite3_prepare_v2(h->conn, bdata(&q), blength(&q) + 1, &stmt, NULL) ==
+          SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(h->conn));
+  CHECK(
+      sqlite3_bind_int64(stmt, 1, id) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+  err = sqlite3_step(stmt);
+  switch (err) {
+  case SQLITE_ROW:
+    strret = bfromcstr((const char *)sqlite3_column_text(stmt, 0));
+    CHECK(strret != NULL, "Couldn't create string");
+    break;
+  case SQLITE_DONE:
+  default:
+    LOG_ERR("Couldn't get row from table: %s", sqlite3_errmsg(h->conn));
+    goto error;
+  }
+
+  if (ret_err != NULL) {
+    *ret_err = DBW_OK;
+  }
+exit:
+  if (stmt != NULL) {
+    sqlite3_finalize(stmt);
+  }
+  return strret;
+error:
+  if (ret_err != NULL && *ret_err == DBW_OK) {
+    *ret_err = DBW_ERR;
+  }
+  if (strret != NULL) {
+    bdestroy(strret);
+    strret = NULL;
+  }
+  goto exit;
+}
+
 static bstring
 sqlite3_get_snippet(DBWHandler *h, sqlite_int64 id, enum DBWError *ret_err) {
   int err = 0;
@@ -1521,6 +1579,7 @@ static int dbw_sqlite3_close(DBWHandler *h) {
       rc == SQLITE_OK,
       "Coudldn't close sqlite connetion: %s",
       sqlite3_errstr(rc));
+  LOG_DEBUG("DB closed");
   // fallthrough
 error:
   if (h != NULL) {
@@ -1927,12 +1986,18 @@ sqlite_int64 dbw_path_descend(DBWHandler *h, bstring path, enum DBWError *err) {
     }
     return -1;
   }
+}
 
-error:
-  if (err != NULL) {
-    *err = DBW_ERR;
+bstring
+dbw_snippet_path_ascend(DBWHandler *h, sqlite_int64 id, enum DBWError *err) {
+  if (h->DBWDBType == DBW_SQLITE3)
+    return sqlite3_snippet_path_ascend(h, id, err);
+  else {
+    if (err != NULL) {
+      *err = DBW_ERR_UNKN_DB;
+    }
+    return NULL;
   }
-  return -1;
 }
 
 int dbw_close(DBWHandler *h) {

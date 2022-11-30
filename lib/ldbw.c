@@ -137,10 +137,10 @@ static int l_path_descend(lua_State *lua) {
   btfromcstr(tbpath, path);
   int dir = dbw_path_descend(db, &tbpath, &err);
   if (err != DBW_OK) {
-      lua_pushnil(lua);
-      lua_pushstring(lua, "Couldn't get dir by path");
-      ret = 2;
-      goto exit;
+    lua_pushnil(lua);
+    lua_pushstring(lua, "Couldn't get dir by path");
+    ret = 2;
+    goto exit;
   }
   lua_pushinteger(lua, dir);
   ret = 1;
@@ -148,6 +148,43 @@ static int l_path_descend(lua_State *lua) {
 exit:
   return ret;
 }
+
+static int l_path_ascend(lua_State *lua) {
+  int ret = 0;
+  int err = 0;
+  luaL_checktype(lua, 1, LUA_TLIGHTUSERDATA);
+  luaL_checktype(lua, 2, LUA_TNUMBER);
+  struct LuaCtx *luactx = (struct LuaCtx *)lua_touserdata(lua, 1);
+  DBWHandler *db = ynote_get_db_handle(luactx);
+  struct LDBWCtx *ldbwctx = ynote_get_ldbwctx(luactx);
+  sqlite3_stmt *stmt = ldbwctx->stmt;
+  sqlite_int64 id = lua_tointeger(lua, 2);
+  bstring s = dbw_snippet_path_ascend(db, id, &err);
+  if (err != DBW_OK) {
+    lua_pushnil(lua);
+    lua_pushstring(lua, "Couldn't get dir by path");
+    ret = 2;
+    if (s != NULL) {
+      bdestroy(s);
+    }
+    goto exit;
+  }
+  if (bdata(s) == NULL) {
+    lua_pushnil(lua);
+    lua_pushstring(lua, "DB error");
+    ret = 2;
+    goto exit;
+  }
+  lua_pushstring(lua, bdata(s));
+  lua_pushnil(lua);
+  ret = 2;
+  if (s != NULL) {
+    bdestroy(s);
+  }
+exit:
+  return ret;
+}
+
 static int l_sqlite3_step(lua_State *lua) {
   int ret = 0;
   int err = 0;
@@ -333,6 +370,7 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
   bstring type = NULL;
 
   bstrListEmb *tagslist = NULL;
+  bstrListEmb tagslist_noempty = {0};
 
   BPairs *bp = NULL;
 
@@ -371,32 +409,27 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
       bp = bsplittopairs_noalloc(&toml);
       bmid2tbstr(body, &body, toml_end + border_len, blength(&body));
 
-#define _BP_GET_ENSURE(k)         \
-  (k) = BPairs_get(bp, &BSS(#k)); \
-  if ((k) != NULL) {              \
-    (k) = bstrcpy(k);             \
-    CHECK_MEM(k);                 \
-  }
+      title = BPairs_get(bp, &BSS("title"));
+      tags = BPairs_get(bp, &BSS("tags"));
+      type = BPairs_get(bp, &BSS("type"));
 
-      _BP_GET_ENSURE(title);
-      _BP_GET_ENSURE(tags);
-      _BP_GET_ENSURE(type);
-
-#undef _BP_GET_ENSURE
-
-      if (title == NULL || type == NULL) {
+      if (bdata(title) == NULL || bdata(type) == NULL) {
         lua_pushnil(lua);
         lua_pushfstring(lua, "title or type is missing");
         ret = 2;
         goto error;
       }
 
-      if (tags != NULL) {
+      if (bdata(tags) != NULL) {
         tagslist = bsplit_noalloc(tags, ',');
         CHECK(tagslist != NULL, "Couldn't split tags");
       }
       for (size_t i = 0; i < tagslist->n; i++) {
         CHECK(tbtrimws(&tagslist->a[i]) == BSTR_OK, "Couldn't trim string");
+        if (blength(&tagslist->a[i]) > 0) {
+          rv_push(tagslist_noempty, tagslist->a[i], &err);
+          CHECK(err == RV_ERR_OK, "Couldn't push to vec");
+        }
       }
       sqlite_int64 dir = 1;
       dir = dbw_path_descend(db, &tbpath, &err);
@@ -414,9 +447,9 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
       }
 
       if (edit) {
-        id = dbw_edit_snippet(db, id, title, &body, type, tagslist, 0, &err);
+        id = dbw_edit_snippet(db, id, title, &body, type, &tagslist_noempty, 0, &err);
       } else {
-        id = dbw_new_snippet(db, title, &body, type, tagslist, dir, &err);
+        id = dbw_new_snippet(db, title, &body, type, &tagslist_noempty, dir, &err);
       }
     }
   } else {
@@ -435,6 +468,7 @@ exit:
   if (tagslist != NULL) {
     bstrListEmb_destroy(tagslist);
   }
+  rv_destroy(tagslist_noempty);
   return ret;
 error:
   goto exit;
@@ -449,6 +483,7 @@ static const struct luaL_Reg ldbw[] = {
     {"column_text", l_sqlite3_column_text},
     {"column_int64", l_sqlite3_column_int64},
     {"path_descend", l_path_descend},
+    {"path_ascend", l_path_ascend},
     {"create_from_raw", l_post_create_snippet_from_raw_response},
     {NULL, NULL}};
 

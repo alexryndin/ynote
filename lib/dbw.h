@@ -170,7 +170,9 @@ bstring json_api_find_snippets(
 
 bstring json_api_get_snippet(
     struct DBWHandler *db_handle, sqlite_int64 id, int render, int *ec);
-sqlite_int64 dbw_path_descend(
-    DBWHandler *h, bstring path, enum DBWError *err);
+sqlite_int64 dbw_path_descend(DBWHandler *h, bstring path, enum DBWError *err);
+
+bstring
+dbw_snippet_path_ascend(DBWHandler *h, sqlite_int64 id, enum DBWError *err);
 
 #endif

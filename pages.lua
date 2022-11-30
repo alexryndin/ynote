@@ -72,6 +72,10 @@ function pages.menu_bar(p)
   <strong>
   <a href="/root"><span class="muted">❯</span> Y </a><span class="muted">·</span>
 ]])
+  if id ~= nil then
+    table.insert(ret, string.format([[
+<a rel="noopener noreferrer" href="/lua/get_snippet/%d">#%d</a> <span class="muted">·</span> ]], id, id))
+  end
   if edit then
     table.insert(ret, string.format([[
 <a rel="noopener noreferrer" href="/lua/get_snippet/%d?edit=true&edit_mode=true">edit</a> <span class="muted">·</span> ]], id))
@@ -79,6 +83,7 @@ function pages.menu_bar(p)
   if new then
     table.insert(ret, string.format([[<a rel="noopener noreferrer" href="/api/create_snippet?path=%s">new</a> <span class="muted">·</span> ]], path))
   end
+  table.insert(ret, string.format([[<a rel="noopener noreferrer" href="/root%s">%s</a> <span class="muted">·</span> ]], path, path))
 
   table.insert(ret, [[</strong></nav>]])
   return table.concat(ret, "")
@@ -95,7 +100,8 @@ local snippet_view = tags(function(p)
     body (
       unsafe(pages.menu_bar {
         ["edit"] = not p["edit_mode"] and not p["new"],
-        ["id"] = p["id"]
+        ["id"] = p["id"],
+        ["path"] = p["path"],
       }),
       div {class = "main"} (
         h1 (p["title"]),
@@ -121,12 +127,12 @@ end
 
 dir_sym = "📁"
 
-local snippets = function(s, port)
+local snippets = function(s, port, cwd)
   ret = {}
   table.insert(ret, [[<p class="list-item">]])
   for _, v in ipairs(s) do
     sep = (v["type"] == "d") and dir_sym..": " or "ID: "
-    href = v["type"] == "d" and "/root/" .. v["title"]
+    href = v["type"] == "d" and string.format("/root%s%s", cwd == "/" and "/" or cwd .. "/", v["title"])
                        or "/lua/get_snippet/"..v["id"]
 
     table.insert(ret, string.format([[<a rel="noopener noreferrer" class="list-item" href="%s">%s%d ]], href, sep, v["id"]))
@@ -156,6 +162,38 @@ end
 
 local startswith  = function(String,Start)
    return string.sub(String,1,string.len(Start))==Start
+end
+
+function pages.index_snippets(s, path, message)
+  return template.process([[
+<!DOCTYPE html>
+  <head>
+    <meta charset="utf-8">
+    <title>ynote</title>
+    <link rel="stylesheet" href="/static/css/nb.css">
+  </head>
+  <body>
+  {*menu*}
+    <div class="main">
+      <form id="search" accept-charset="UTF-8" action="/command" enctype="text/plain" method="post">
+        {% if message ~= "" then %}
+          <div>
+            {{message}}
+          </div>
+        {% end %}
+        <input name="command" id="search-input" placeholder="command">
+        <input type="hidden" name="path" value="{*path*}">
+      </form>
+      {*snippets*}
+    </div>
+  </body>
+</html>
+]], {
+  menu = pages.menu_bar {["new"] = true, ["path"] = path},
+  path = path,
+  snippets = snippets(s, port, path),
+  message = message
+})
 end
 
 function pages.index(ud, path, message)
@@ -204,38 +242,10 @@ GROUP BY snippets.id;]]
   end
   local port = httpaux.get_port(ud)
   local s = snippets_to_table(ud)
-  return template.process([[
-<!DOCTYPE html>
-  <head>
-    <meta charset="utf-8">
-    <title>ynote</title>
-    <link rel="stylesheet" href="/static/css/nb.css">
-  </head>
-  <body>
-  {*menu*}
-    <div class="main">
-      <form id="search" accept-charset="UTF-8" action="/command" enctype="text/plain" method="post">
-        {% if message ~= "" then %}
-          <div>
-            {{message}}
-          </div>
-        {% end %}
-        <input name="command" id="search-input" placeholder="command">
-        <input type="hidden" name="path" value="{*path*}">
-      </form>
-      {*snippets*}
-    </div>
-  </body>
-</html>
-]], {
-  menu = pages.menu_bar {["new"] = true, ["path"] = path},
-  path = path,
-  snippets = snippets(s, port),
-  message = message
-})
+  return pages.index_snippets(s, path, message)
 end
 
-function pages.get_snippet(ud, id, edit_mode, path, message)
+function pages.get_snippet(ud, id, edit_mode, snippet_dir, message)
   print("andd here edit is ", edit_mode)
   q = [[SELECT snippets.id as id,
                  title,]]
@@ -271,7 +281,8 @@ function pages.get_snippet(ud, id, edit_mode, path, message)
     content = ldbw.column_text(ud, 2),
     title = ldbw.column_text(ud, 1),
     ["_type"] = ldbw.column_text(ud, 3),
-    tags = ldbw.column_text(ud, 6)
+    tags = ldbw.column_text(ud, 6),
+    path = snippet_dir,
   }
 
   return tostring(snippet_view(params))

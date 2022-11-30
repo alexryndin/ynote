@@ -1061,6 +1061,13 @@ static void ynote_app_destroy(struct YNoteApp *app) {
   if (app->dbpath != NULL) {
     bdestroy(app->dbpath);
   }
+  if (app->conf_path != NULL) {
+    bdestroy(app->conf_path);
+  }
+  if (app->lua != NULL) {
+    lua_close(app->lua);
+  }
+  rv_destroy(app->users_info.users);
   free(app);
 error:
   return;
@@ -2299,7 +2306,7 @@ static int ynote_lua_check_and_execute_file(
   }
   LOG_DEBUG("Lua returned status %d", status);
 
-  return status;
+  // Fallthrough
 exit:
   if (ldbwctx != NULL) {
     LDBWCtx_destroy(ldbwctx);
@@ -2398,6 +2405,9 @@ static enum MHD_Result mhd_handle_lua(
   goto exit;
 
 exit:
+  if(ldbwctx != NULL) {
+    LDBWCtx_destroy(ldbwctx);
+  }
   lua_settop(lua, 0);
   if (path != NULL) {
     bdestroy(path);
@@ -2607,6 +2617,8 @@ exit:
     ynote_app_destroy(app);
   }
   curl_global_cleanup();
+  MHD_stop_daemon(daemon);
+  
   return rc;
 error:
   rc = 1;

@@ -1,6 +1,6 @@
-local inspect = require('inspect')
 local math = require('math')
 local pages = require "pages"
+
 return function (ud)
   t = httpaux.get_query(ud)
   method = httpaux.get_method(ud)
