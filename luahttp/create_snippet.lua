@@ -14,11 +14,12 @@ return function (ud)
   if method == "POST" then
     print("path would be", path, t["path"])
     id, err = ldbw.create_from_raw(ud, id, edit, path)
+    snippet_dir = ldbw.path_ascend(ud, id)
     if err ~= 0 then
       print(err)
       return "server error", 500
     end
-    return pages.get_snippet(ud, id, false, "")
+    return pages.get_snippet(ud, id, false, snippet_dir, "")
   else
     return pages.new_snippet(ud, "", path)
   end

@@ -105,6 +105,10 @@ local snippet_view = tags(function(p)
       }),
       div {class = "main"} (
         h1 (p["title"]),
+        string.format("tags: %s", p["tags"]),
+        br,
+        string.format("type: %s", p["_type"]),
+        hr,
         snippet(p)
       )
     )
