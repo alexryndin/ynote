@@ -944,16 +944,18 @@ static int read_config(struct YNoteApp *app, bstring path) {
 
   CHECK(
       (rc = luaL_loadfile(app->lua, bdata(path))) == LUA_OK,
-      "Couldn't load config");
+      "Couldn't load config: %s", lua_tostring(app->lua, -1));
   CHECK(
       (rc = lua_pcall(app->lua, 0, 0, 0)) == LUA_OK,
       "Couldn't evaluate config");
 
-  LUA_CONF_READ_STRING(app->tg_token, tg_token);
+  LUA_CONF_READ_BOOL(app->tg_bot_enabled, tg_bot_enabled, 1);
+  if (app->tg_bot_enabled) {
+    LUA_CONF_READ_STRING(app->tg_token, tg_token);
+  }
   LUA_CONF_READ_STRING(app->dbpath, dbpath);
 
   LUA_CONF_READ_NUMBER(app->client_timeout, client_timeout, 30);
-  LUA_CONF_READ_BOOL(app->tg_bot_enabled, tg_bot_enabled, 1);
 
   LUA_CONF_READ_NUMBER(app->port, port, 8080);
 
@@ -1606,8 +1608,12 @@ static enum MHD_Result mhd_api_handle_lua_with_post(
 exit:
   return ret;
 error:
-  ret = MHD_NO;
-  goto exit;
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_INTERNAL_SERVER_ERROR,
+      response,
+      status_server_error,
+      ret);
 }
 
 static const struct tagbstring get_dirs_sql =
@@ -2269,9 +2275,6 @@ static int ynote_lua_check_and_execute_file(
   struct stat filestat;
   struct LDBWCtx *ldbwctx = NULL;
 
-  ldbwctx = LDBWCtx_create();
-  CHECK(ldbwctx != NULL, "Couldn't create database context");
-
   if (stat(path, &filestat) != 0) {
     if (errno == ENOENT) {
       return -1;
@@ -2289,6 +2292,9 @@ static int ynote_lua_check_and_execute_file(
       lua_pcall(lua, 0, 1, 0) == 0,
       "Couldn't execute lua file: %s",
       lua_tostring(lua, -1));
+
+  ldbwctx = LDBWCtx_create();
+  CHECK(ldbwctx != NULL, "Couldn't create database context");
 
   luactx.ci = ci;
   luactx.ldbwctx = ldbwctx;
@@ -2313,7 +2319,7 @@ exit:
   }
   return status;
 error:
-  return status = 500;
+  status = -2;
   goto exit;
 }
 
@@ -2405,7 +2411,7 @@ static enum MHD_Result mhd_handle_lua(
   goto exit;
 
 exit:
-  if(ldbwctx != NULL) {
+  if (ldbwctx != NULL) {
     LDBWCtx_destroy(ldbwctx);
   }
   lua_settop(lua, 0);
@@ -2618,7 +2624,7 @@ exit:
   }
   curl_global_cleanup();
   MHD_stop_daemon(daemon);
-  
+
   return rc;
 error:
   rc = 1;

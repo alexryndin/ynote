@@ -66,6 +66,8 @@ function pages.menu_bar(p)
   local path = p["path"]
   local id = p["id"]
   print("create is ", create)
+  print("p is ", p)
+  print("edit is ", p['edit'])
   ret = {}
   table.insert(ret, [[
 <nav class="header-crumbs">
@@ -91,6 +93,25 @@ end
 
 local snippet_view = tags(function(p)
   print("nav is ", p["id"])
+  local header = tags(function(edit_mode)
+    local header_div
+    if not edit_mode then
+      header_div = div(
+          string.format("tags: %s", p["tags"]),
+          br,
+          string.format("type: %s", p["_type"]),
+          br,
+          string.format("created: %s", p["created"]),
+          br,
+          string.format("updated: %s", p["updated"]),
+          hr
+      )
+    else
+      header_div = ""
+    end
+    return header_div
+  end)
+
   return html (
     head (
         meta { charset = "utf-8" },
@@ -105,10 +126,7 @@ local snippet_view = tags(function(p)
       }),
       div {class = "main"} (
         h1 (p["title"]),
-        string.format("tags: %s", p["tags"]),
-        br,
-        string.format("type: %s", p["_type"]),
-        hr,
+        header(p["edit_mode"]),
         snippet(p)
       )
     )
@@ -116,7 +134,7 @@ local snippet_view = tags(function(p)
 end)
 
 function pages.new_snippet(ud, message, path)
-  params = {
+  local params = {
     id = nil,
     content = [[]],
     title = "New snippet",
@@ -285,9 +303,13 @@ function pages.get_snippet(ud, id, edit_mode, snippet_dir, message)
     content = ldbw.column_text(ud, 2),
     title = ldbw.column_text(ud, 1),
     ["_type"] = ldbw.column_text(ud, 3),
+    created = ldbw.column_text(ud, 4),
+    updated = ldbw.column_text(ud, 5),
     tags = ldbw.column_text(ud, 6),
     path = snippet_dir,
   }
+
+  print("here id is ", params)
 
   return tostring(snippet_view(params))
 end

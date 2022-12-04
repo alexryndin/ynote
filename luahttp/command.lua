@@ -164,9 +164,13 @@ WHERE id = ?
   if err then print(err); return "server error" end
 
   local code, err = ldbw.step(ud)
-  if codes ~= sqlite3.SQLITE_DONE then print(err); return "server error" end
+  if code ~= sqlite3.SQLITE_DONE then print(err); return "server error" end
 
-  return "ok"
+  return "moved " ..
+         (argv[2] == 'd' and "directory " or "snippet ") ..
+         argv[3] ..
+         " to " ..
+         argv[4]
 end
 
 return function (ud)

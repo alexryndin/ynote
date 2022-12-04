@@ -538,7 +538,8 @@ static bstring sqlite3_snippet_path_ascend(
       "where ascend.parent_id = dirs.id and ascend.id != ascend.parent_id "
       "limit 255 "
       ") "
-      "select IIF(count(*) > 1, substr(group_concat(name, '/'),5), '/') from (select name from ascend "
+      "select IIF(count(*) > 1, substr(group_concat(name, '/'),5), '/') from "
+      "(select name from ascend "
       "order by x desc);");
 
   CHECK(
@@ -1037,6 +1038,77 @@ error:
   goto exit;
 }
 
+static sqlite3_int64 sqlite3_get_or_insert_snippet_type(
+    DBWHandler *h, const bstring type, int *ret_err) {
+  sqlite3_stmt *stmt = NULL;
+  sqlite3_int64 type_id = 0;
+
+  const struct tagbstring insert_snippet_type_sql =
+      bsStatic("INSERT OR IGNORE INTO snippet_types (name) VALUES (?);");
+
+  CHECK(
+      sqlite3_prepare_v2(
+          h->conn,
+          bdata(&insert_snippet_type_sql),
+          blength(&insert_snippet_type_sql) + 1,
+          &stmt,
+          NULL) == SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(h->conn));
+
+  CHECK(
+      sqlite3_bind_text(stmt, 1, bdata(type), -1, NULL) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
+  CHECK(
+      sqlite3_step(stmt) == SQLITE_DONE,
+      "Couldn't get snippet type %s",
+      bdata(type));
+
+  CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+  stmt = NULL;
+
+  const struct tagbstring get_snippet_type_sql =
+      bsStatic("SELECT id from snippet_types where name = ?;");
+
+  CHECK(
+      sqlite3_prepare_v2(
+          h->conn,
+          bdata(&get_snippet_type_sql),
+          blength(&get_snippet_type_sql) + 1,
+          &stmt,
+          NULL) == SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(h->conn));
+
+  CHECK(
+      sqlite3_bind_text(stmt, 1, bdata(type), -1, NULL) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
+  CHECK(
+      sqlite3_step(stmt) == SQLITE_ROW,
+      "Couldn't get snippet type %s",
+      bdata(type));
+
+  type_id = sqlite3_column_int64(stmt, 0);
+  CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+  stmt = NULL;
+  if (ret_err != NULL) {
+    *ret_err = DBW_OK;
+  }
+  // fallthrough
+exit:
+  if (stmt != NULL) {
+    sqlite3_finalize(stmt);
+  }
+  return type_id;
+error:
+  if (ret_err != NULL) {
+    *ret_err = DBW_ERR;
+  }
+  goto exit;
+}
+
 static sqlite3_int64 sqlite3_edit_snippet(
     DBWHandler *h,
     const sqlite3_int64 snippet_id,
@@ -1056,33 +1128,8 @@ static sqlite3_int64 sqlite3_edit_snippet(
 
   // Step 1: get corresponding snippet type
   if (type != NULL) {
-    const struct tagbstring check_type_sql =
-        bsStatic("SELECT id FROM snippet_types WHERE name = ?;");
-
-    CHECK(
-        sqlite3_prepare_v2(
-            h->conn,
-            bdata(&check_type_sql),
-            blength(&check_type_sql) + 1,
-            &stmt,
-            NULL) == SQLITE_OK,
-        "Couldn't prepare statement: %s",
-        sqlite3_errmsg(h->conn));
-
-    CHECK(
-        sqlite3_bind_text(stmt, 1, bdata(type), blength(type), NULL) ==
-            SQLITE_OK,
-        "Couldn't bind parameter to statement");
-
-    CHECKRC(
-        sqlite3_step(stmt) == SQLITE_ROW,
-        DBW_ERR_NOT_FOUND,
-        "Couldn't get snippet type %s",
-        bdata(type));
-
-    type_id = sqlite3_column_int64(stmt, 0);
-    CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
-    stmt = NULL;
+    type_id = sqlite3_get_or_insert_snippet_type(h, type, &err);
+    CHECK(err == DBW_OK, "Couldn't retrieve type_id");
   }
 
   // Step 2: ensure all tags are present in tags table
@@ -1223,31 +1270,8 @@ static sqlite3_int64 sqlite3_new_snippet(
   bstring question_marks = NULL;
 
   // Step 1: get corresponding snippet type
-  const struct tagbstring check_type_sql =
-      bsStatic("SELECT id FROM snippet_types WHERE name = ?;");
-
-  CHECK(
-      sqlite3_prepare_v2(
-          h->conn,
-          bdata(&check_type_sql),
-          blength(&check_type_sql) + 1,
-          &stmt,
-          NULL) == SQLITE_OK,
-      "Couldn't prepare statement: %s",
-      sqlite3_errmsg(h->conn));
-
-  CHECK(
-      sqlite3_bind_text(stmt, 1, bdata(type), -1, NULL) == SQLITE_OK,
-      "Couldn't bind parameter to statement");
-
-  CHECKRC(
-      sqlite3_step(stmt) == SQLITE_ROW,
-      DBW_ERR_NOT_FOUND,
-      "Couldn't get snippet type %s",
-      bdata(type));
-
-  type_id = sqlite3_column_int64(stmt, 0);
-  CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+  type_id = sqlite3_get_or_insert_snippet_type(h, type, &err);
+  CHECK(err == DBW_OK, "Couldn't retrieve type_id");
 
   // Step 2: ensure all tags are present in tags table
   if (tags != NULL && rv_len(*tags) > 0) {

@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS snippets (
   content TEXT,
   type INTEGER NOT NULL,
   dir NOT NULL DEFAULT 1,
-  created DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  updated DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
   deleted BOOL DEFAULT FALSE NOT NULL,
   FOREIGN KEY(type) REFERENCES snippet_types(id),
   FOREIGN KEY(dir) REFERENCES dirs(id)
@@ -60,6 +60,57 @@ CREATE TABLE IF NOT EXISTS files_to_tags (
   FOREIGN KEY(tag_id) REFERENCES tags(id)
   UNIQUE(file_id, tag_id)
 );
+
+CREATE VIEW snippets_view AS
+SELECT snippets.id as id, title, content, name as type, dir, created, updated, deleted
+FROM snippets JOIN snippet_types
+ON snippets.type = snippet_types.id;
+
+CREATE TRIGGER insert_snippet_view
+  INSTEAD OF INSERT ON snippets_view
+BEGIN
+  INSERT OR IGNORE INTO snippet_types (name)
+  VALUES (new.type);
+
+  INSERT INTO snippets (
+    id,
+    title,
+    content,
+    type,
+    dir,
+    created,
+    updated,
+    deleted
+  ) VALUES (
+  new.id,
+  new.title,
+  new.content,
+  (select snippet_types.id from snippet_types where name = new.type),
+  new.dir,
+  ifnull(new.created, datetime()),
+  ifnull(new.updated, datetime()),
+  ifnull(new.deleted, false)
+  );
+END;
+
+CREATE TRIGGER update_snippet_view
+  INSTEAD OF UPDATE ON snippets_view
+BEGIN
+  INSERT OR IGNORE INTO snippet_types (name)
+  VALUES (new.type);
+
+  UPDATE snippets
+  SET
+  id = new.id,
+  title = new.title,
+  content = new.content,
+  type = (select snippet_types.id from snippet_types where name = new.type),
+  dir = new.dir,
+  created = new.created,
+  updated = iif(old.updated = new.updated, datetime(), new.updated),
+  deleted = new.deleted
+  where id = new.id;
+END;
 
 
 INSERT INTO snippet_types (name) VALUES ("bash");

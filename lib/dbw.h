@@ -9,6 +9,7 @@
 #include <sqlite3.h>
 
 #define SNIPPETS_TABLE        "snippets"
+#define SNIPPETS_VIEW_TABLE        "snippets_view"
 #define SNIPPET_TYPES_TABLE   "snippet_types"
 #define TAGS_TABLE            "tags"
 #define SNIPPET_TO_TAGS_TABLE "snippet_to_tags"
