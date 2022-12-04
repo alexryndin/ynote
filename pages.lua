@@ -20,7 +20,7 @@ local snippet = tags(function(p)
   if edit_mode then
     local content = [[+++
 title = %s
-type =  %s
+type = %s
 tags = %s
 +++
 %s]]

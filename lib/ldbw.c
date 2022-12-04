@@ -396,71 +396,86 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
   CHECK(strstartswith(bdata(&body), "content="), "Wrong form");
   bmid2tbstr(body, &body, strlen("content="), blength(&body));
 
-  if (strstartswith(bdata(&body), "+++\n")) {
-    int toml_end = border_len;
-    toml_end = binstr(&body, border_len, &(struct tagbstring)bsStatic("+++\n"));
-    if (toml_end != BSTR_ERR && toml_end > border_len) {
-      bmid2tbstr(toml, &body, border_len, toml_end - border_len);
-      LOG_DEBUG(
-          "toml to parse is %s, toml_end %d, border_len %d",
-          bdata(&toml),
-          toml_end,
-          border_len);
-      bp = bsplittopairs_noalloc(&toml);
-      bmid2tbstr(body, &body, toml_end + border_len, blength(&body));
+  if (!strstartswith(bdata(&body), "+++\n")) {
+    goto wrong_header;
+  }
+  int toml_end = border_len;
+  toml_end = binstr(&body, border_len, &(struct tagbstring)bsStatic("+++\n"));
+  if (toml_end == BSTR_ERR && toml_end <= border_len) {
+    goto wrong_header;
+  }
+  bmid2tbstr(toml, &body, border_len, toml_end - border_len);
+  LOG_DEBUG(
+      "toml to parse is %s, toml_end %d, border_len %d",
+      bdata(&toml),
+      toml_end,
+      border_len);
+  bp = bsplittopairs_noalloc(&toml);
+  bmid2tbstr(body, &body, toml_end + border_len, blength(&body));
 
-      title = BPairs_get(bp, &BSS("title"));
-      tags = BPairs_get(bp, &BSS("tags"));
-      type = BPairs_get(bp, &BSS("type"));
+  title = BPairs_get(bp, &BSS("title"));
+  tags = BPairs_get(bp, &BSS("tags"));
+  type = BPairs_get(bp, &BSS("type"));
 
-      if (bdata(title) == NULL || bdata(type) == NULL) {
-        lua_pushnil(lua);
-        lua_pushfstring(lua, "title or type is missing");
-        ret = 2;
-        goto error;
-      }
+  if (bdata(title) == NULL || bdata(type) == NULL) {
+    lua_pushnil(lua);
+    lua_pushfstring(lua, "title or type is missing");
+    ret = 2;
+    goto error;
+  }
 
-      if (bdata(tags) != NULL) {
-        tagslist = bsplit_noalloc(tags, ',');
-        CHECK(tagslist != NULL, "Couldn't split tags");
-      }
-      for (size_t i = 0; i < tagslist->n; i++) {
-        CHECK(tbtrimws(&tagslist->a[i]) == BSTR_OK, "Couldn't trim string");
-        if (blength(&tagslist->a[i]) > 0) {
-          rv_push(tagslist_noempty, tagslist->a[i], &err);
-          CHECK(err == RV_ERR_OK, "Couldn't push to vec");
-        }
-      }
-      sqlite_int64 dir = 1;
-      dir = dbw_path_descend(db, &tbpath, &err);
-      if (err == DBW_ERR_NOT_FOUND) {
-        lua_pushnil(lua);
-        lua_pushstring(lua, "path not found");
-        ret = 2;
-        goto error;
-      }
-      if (err != DBW_OK) {
-        lua_pushnil(lua);
-        lua_pushstring(lua, "server error");
-        ret = 2;
-        goto error;
-      }
-
-      if (edit) {
-        id = dbw_edit_snippet(db, id, title, &body, type, &tagslist_noempty, 0, &err);
-      } else {
-        id = dbw_new_snippet(db, title, &body, type, &tagslist_noempty, dir, &err);
+  if (bdata(tags) != NULL) {
+    tagslist = bsplit_noalloc(tags, ',');
+    CHECK(tagslist != NULL, "Couldn't split tags");
+    for (size_t i = 0; i < tagslist->n; i++) {
+      CHECK(tbtrimws(&tagslist->a[i]) == BSTR_OK, "Couldn't trim string");
+      if (blength(&tagslist->a[i]) > 0) {
+        rv_push(tagslist_noempty, tagslist->a[i], &err);
+        CHECK(err == RV_ERR_OK, "Couldn't push to vec");
       }
     }
-  } else {
-    // if header is missing
-    lua_pushnil(lua);
-    lua_pushstring(lua, "header block is missing");
-    ret = 2;
   }
+  sqlite_int64 dir = 1;
+  dir = dbw_path_descend(db, &tbpath, &err);
+  if (err == DBW_ERR_NOT_FOUND) {
+    lua_pushnil(lua);
+    lua_pushstring(lua, "path not found");
+    lua_pushinteger(lua, 403);
+    ret = 3;
+    goto error;
+  }
+  if (err != DBW_OK) {
+    lua_pushnil(lua);
+    lua_pushstring(lua, "server error");
+    ret = 2;
+    goto error;
+  }
+
+  if (edit) {
+    id = dbw_edit_snippet(
+        db, id, title, &body, type, &tagslist_noempty, 0, &err);
+  } else {
+    id = dbw_new_snippet(db, title, &body, type, &tagslist_noempty, dir, &err);
+  }
+
+  if (err != DBW_OK) {
+    if (err == DBW_ERR_ALREADY_EXISTS) {
+      lua_pushnil(lua);
+      lua_pushstring(lua, "Snippet already exists");
+      lua_pushinteger(lua, 403);
+      ret = 3;
+      goto error;
+    }
+    lua_pushnil(lua);
+    lua_pushfstring(lua, "server error");
+    ret = 2;
+    goto error;
+  }
+
   lua_pushinteger(lua, id);
-  lua_pushinteger(lua, err);
+  lua_pushnil(lua);
   ret = 2;
+  // fallthrough
 exit:
   if (bp != NULL) {
     BPairs_destroy(bp);
@@ -470,6 +485,13 @@ exit:
   }
   rv_destroy(tagslist_noempty);
   return ret;
+wrong_header:
+  // if header is missing
+  lua_pushnil(lua);
+  lua_pushstring(lua, "header block is missing or malformed");
+  lua_pushinteger(lua, 403);
+  ret = 3;
+  goto exit;
 error:
   goto exit;
 }
