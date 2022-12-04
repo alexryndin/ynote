@@ -39,7 +39,7 @@ static const struct tagbstring _insert_file_sql = bsStatic(
     "INSERT INTO " FILES_TABLE " (name, location) VALUES (?, ?) RETURNING id");
 
 static const struct tagbstring _update_snippet_sql =
-    bsStatic("UPDATE " SNIPPETS_TABLE " SET deleted =  ");
+    bsStatic("UPDATE " SNIPPETS_TABLE " SET updated = datetime(), deleted =  ");
 
 static const struct tagbstring _insert_t_to_tags_sql =
     bsStatic("INSERT OR IGNORE INTO %s (snippet_id, tag_id) SELECT ?, id "
