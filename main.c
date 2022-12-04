@@ -944,7 +944,8 @@ static int read_config(struct YNoteApp *app, bstring path) {
 
   CHECK(
       (rc = luaL_loadfile(app->lua, bdata(path))) == LUA_OK,
-      "Couldn't load config: %s", lua_tostring(app->lua, -1));
+      "Couldn't load config: %s",
+      lua_tostring(app->lua, -1));
   CHECK(
       (rc = lua_pcall(app->lua, 0, 0, 0)) == LUA_OK,
       "Couldn't evaluate config");
@@ -2541,8 +2542,8 @@ static int mhd_handler(
     }
   case RESTAPI_UNKNOWN:
   default:
-    MHD_RESPONSE_WITH_TAGBSTRING(
-        connection, MHD_HTTP_OK, response, status_ok, ret);
+    MHD_RESPONSE_REDIRECT_TB(
+        connection, MHD_HTTP_FOUND, &BSS("/root"), ret);
   }
 exit:
   LOG_DEBUG("ret is %d, uri is %s, method %s", ret, url, method);

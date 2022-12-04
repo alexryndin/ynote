@@ -31,7 +31,6 @@
         MHD_create_response_from_buffer(0, "", MHD_RESPMEM_PERSISTENT); \
     CHECK(response != NULL, "NULL resp");                               \
     MHD_add_response_header(response, "Location", bdata(s));            \
-    bdestroy(s);                                                        \
     (ret) = MHD_queue_response((connection), (status), (response));     \
     MHD_destroy_response((response));                                   \
     goto exit;                                                          \
