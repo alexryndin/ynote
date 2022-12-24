@@ -2,7 +2,7 @@ local tags = require "luahttp/tags"
 local string = require "string"
 local template = require "resty.template.safe"
 
-pages = {}
+local pages = {}
 
 local snippet = tags(function(p)
   local _edit = p["edit"]
@@ -14,8 +14,6 @@ local snippet = tags(function(p)
   local _id = p["id"]
   local _path = p["path"]
   local _new = p["new"]
-
-  print("edit_mode is ", edit_mode)
 
   if edit_mode then
     local content = [[+++
@@ -65,9 +63,6 @@ function pages.menu_bar(p)
   local new = p["new"]
   local path = p["path"]
   local id = p["id"]
-  print("create is ", create)
-  print("p is ", p)
-  print("edit is ", p['edit'])
   ret = {}
   table.insert(ret, [[
 <nav class="header-crumbs">
@@ -92,7 +87,6 @@ function pages.menu_bar(p)
 end
 
 local snippet_view = tags(function(p)
-  print("nav is ", p["id"])
   local header = tags(function(edit_mode)
     local header_div
     if not edit_mode then
@@ -147,14 +141,14 @@ function pages.new_snippet(ud, message, path)
   return tostring(snippet_view(params))
 end
 
-dir_sym = "📁"
+local dir_sym = "📁"
 
 local snippets = function(s, port, cwd)
-  ret = {}
+  local ret = {}
   table.insert(ret, [[<p class="list-item">]])
   for _, v in ipairs(s) do
-    sep = (v["type"] == "d") and dir_sym..": " or "ID: "
-    href = v["type"] == "d" and string.format("/root%s%s", cwd == "/" and "/" or cwd .. "/", v["title"])
+    local sep = (v["type"] == "d") and dir_sym..": " or "ID: "
+    local href = v["type"] == "d" and string.format("/root%s%s", cwd == "/" and "/" or cwd .. "/", v["title"])
                        or "/lua/get_snippet/"..v["id"]
 
     table.insert(ret, string.format([[<a rel="noopener noreferrer" class="list-item" href="%s">%s%d ]], href, sep, v["id"]))
@@ -169,7 +163,7 @@ local snippets = function(s, port, cwd)
 end
 
 local snippets_to_table = function(ud)
-  ret = {}
+  local ret = {}
   while ldbw.step(ud) == sqlite3.SQLITE_ROW do
     table.insert(ret, {
       id = ldbw.column_int64(ud, 0),
@@ -219,14 +213,13 @@ function pages.index_snippets(s, path, message)
 end
 
 function pages.index(ud, path, message)
-  print("the message is ", message)
   local path = path ~= "" and path or httpaux.get_path(ud)
   if startswith(path, '/root/') then
     path = path:sub(string.len('/root/'))
   end
   if path == "/root" then path = "/" end
   dir = ldbw.path_descend(ud, path)
-  q = [[
+  local q = [[
 SELECT
   a.id AS id,
   a.name AS title,
@@ -268,8 +261,7 @@ GROUP BY snippets.id;]]
 end
 
 function pages.get_snippet(ud, id, edit_mode, snippet_dir, message)
-  print("andd here edit is ", edit_mode)
-  q = [[SELECT snippets.id as id,
+  local q = [[SELECT snippets.id as id,
                  title,]]
                  .. (edit_mode and " content," or "md2html(content),\n") ..
                  [[snippet_types.name AS type,
@@ -281,7 +273,6 @@ function pages.get_snippet(ud, id, edit_mode, snippet_dir, message)
                    LEFT JOIN snippet_to_tags ON snippets.id = snippet_to_tags.snippet_id
                    LEFT JOIN tags ON snippet_to_tags.tag_id = tags.id
           WHERE snippets.id=?]]
-  print(ud)
   ldbw.prepare(ud, q)
   err = ldbw.bind_int64(ud, 1, id)
   if err then
@@ -308,8 +299,6 @@ function pages.get_snippet(ud, id, edit_mode, snippet_dir, message)
     tags = ldbw.column_text(ud, 6),
     path = snippet_dir,
   }
-
-  print("here id is ", params)
 
   return tostring(snippet_view(params))
 end

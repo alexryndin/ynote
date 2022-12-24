@@ -451,6 +451,11 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
     goto error;
   }
 
+  // remove extra \n
+  if (blength(&body) > 0 && bdata(&body)[blength(&body) - 1] == '\n') {
+    bdata(&body)[--body.slen] = '\0';
+  }
+
   if (edit) {
     id = dbw_edit_snippet(
         db, id, title, &body, type, &tagslist_noempty, 0, &err);

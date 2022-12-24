@@ -18,7 +18,7 @@ local find = function(ud, cmd, cwd)
     end
   end
 
-  q = {[[SELECT
+  local q = {[[SELECT
 snippets.id AS id,
 snippets.title AS title,
 substr(snippets.content, 1, 50) AS content,
@@ -58,7 +58,8 @@ WHERE 1 = 1
 
   table.insert(q, "GROUP BY snippets.id ")
 
-  q = table.concat(q, " ")
+  local q = table.concat(q, " ")
+  print(q)
 
   local err = ldbw.prepare(ud, q)
   if err then print(err); return "server error" end
@@ -77,7 +78,7 @@ WHERE 1 = 1
   if parsed["tags"] ~= nil then
     for i = 1, #parsed["tags"] do
       local err = ldbw.bind_text(ud, to_bind, parsed["tags"][i])
-  print(q)
+  print("tag to bind is ", string.format("-%s-", parsed["tags"][i]))
       to_bind = to_bind + 1
       if err then print(err); return "server error" end
     end
@@ -95,7 +96,7 @@ WHERE 1 = 1
     })
   end
 
-  return pages.index_snippets(snippets, path, message)
+  return pages.index_snippets(snippets, cwd, message)
 end
 
 local mkdir = function(ud, argv, cwd)
@@ -178,7 +179,7 @@ return function (ud)
   local body = httpaux.get_body(ud)
   for line in body:gmatch("[^\n]+") do
     print(line)
-    key, value = line:match("(%S-)=(.*)")
+    local key, value = line:match("(%S-)=(.*)")
     form[key] = value
     -- table.insert(tb, i) -- in case you want to store each separate element in a table
   end
