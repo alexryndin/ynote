@@ -1,0 +1,4 @@
+[Server]
+port = 8080
+[Database]
+path = "ynote.db"

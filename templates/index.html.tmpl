@@ -1,0 +1,26 @@
+{{define "index.html.tmpl"}}
+<!DOCTYPE html>
+<html>
+<head>
+  {{template "styles"}}
+	<title>Notes</title>
+</head>
+<body>
+	<h1>Notes</h1>
+	<form method="POST" action="/notes">
+		<label for="title">Title:</label><br>
+		<input type="text" id="title" name="title"><br>
+		<label for="content">Content:</label><br>
+		<textarea id="content" name="content"></textarea><br><br>
+		<input type="submit" value="Create">
+	</form>
+	<h2>Snippets</h2>
+	<ul>
+		{{range .snippets}}
+			<li><a href="/view/{{.ID}}">{{.Title}}</a></li>
+		{{end}}
+	</ul>
+</body>
+</html>
+{{end}}
+
