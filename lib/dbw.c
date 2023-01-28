@@ -1353,8 +1353,9 @@ error:
   goto exit;
 }
 
-static sqlite3_int64 sqlite3_register_file(
+static bstring sqlite3_register_file(
     DBWHandler *h,
+    const bstring path,
     const bstring filename,
     const bstring location,
     const bstrListEmb *tags,
@@ -1368,6 +1369,7 @@ static sqlite3_int64 sqlite3_register_file(
 
   bstring q = NULL;
   bstring question_marks = NULL;
+  bstring new_path = NULL;
 
   // Step 1: ensure all tags are present in tags table
   if (tags && rv_len(*tags) > 0) {
@@ -1407,6 +1409,11 @@ static sqlite3_int64 sqlite3_register_file(
   file_id = sqlite3_column_int64(stmt, 0);
   CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
   stmt = NULL;
+
+  new_path = bformat("%s%lld_%s", bdata(location), file_id, bdata(filename));
+  CHECK(new_path != NULL, "Couldn't create string");
+  CHECK(rename(bdata(path), bdata(new_path)) == 0, "Couldn't rename file");
+
   // Step 3: bind file to tags
   if (tags && rv_len(*tags) > 0) {
     struct tagbstring tablename = bsStatic(FILES_TABLE);
@@ -1429,7 +1436,7 @@ exit:
   if (question_marks != NULL) {
     bdestroy(question_marks);
   }
-  return ret;
+  return new_path;
 error:
   if (ret_err != NULL && *ret_err == DBW_OK) {
     *ret_err = rc == DBW_OK ? DBW_ERR : rc;
@@ -1978,27 +1985,30 @@ error:
   return NULL;
 }
 
-sqlite_int64 dbw_register_file(
+bstring dbw_register_file(
     DBWHandler *h,
+    const bstring path,
     const bstring filename,
     const bstring location,
     const bstring type,
     const bstrListEmb *tags,
     int *err) {
+  CHECK(path != NULL, "Path to file is required");
+
   if (h->DBWDBType == DBW_SQLITE3)
-    return sqlite3_register_file(h, filename, location, tags, err);
+    return sqlite3_register_file(h, path, filename, location, tags, err);
   else {
     if (err != NULL) {
       *err = DBW_ERR_UNKN_DB;
     }
-    return -1;
+    return NULL;
   }
 
 error:
   if (err != NULL) {
     *err = DBW_ERR;
   }
-  return -1;
+  return NULL;
 }
 
 sqlite_int64 dbw_path_descend(DBWHandler *h, bstring path, enum DBWError *err) {

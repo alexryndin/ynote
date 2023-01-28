@@ -147,8 +147,9 @@ sqlite_int64 dbw_edit_snippet(
     char deleted,
     int *err);
 
-sqlite_int64 dbw_register_file(
+bstring dbw_register_file(
     DBWHandler *h,
+    const bstring path,
     const bstring filename,
     const bstring location,
     const bstring type,

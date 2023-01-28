@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <uuid/uuid.h>
 #include <web_static.h>
 #include <ynote.h>
 
@@ -25,7 +26,8 @@
 #define BUF_LEN 4096
 #endif
 
-#define MAX_UPLOAD_FILES 20
+#define MAX_UPLOAD_FILES   20
+#define MAX_CONTENT_LENGTH 1 * 1024 * 1024 * 1024
 
 #define STR_HELPER(x) #x
 #define STR(x)        STR_HELPER(x)
@@ -176,6 +178,8 @@ struct YNoteApp {
   lua_State *lua;
   int tg_bot_enabled;
 };
+
+static int validate_static_path(bstring path);
 
 DBWHandler *ynote_get_db_handle(struct LuaCtx *luactx) {
   if (luactx == NULL) {
@@ -1164,20 +1168,7 @@ static void request_completed(
 typedef enum MHD_Result (*MHDPageHandler)(
     const void *cls, struct MHD_Connection *connection);
 
-static enum MHD_Result post_snippet_iterator(
-    void *cls,
-    enum MHD_ValueKind kind,
-    const char *key,
-    const char *filename,
-    const char *content_type,
-    const char *transfer_encoding,
-    const char *data,
-    uint64_t off,
-    size_t size) {
-  int ret = MHD_YES;
-  return ret;
-}
-static enum MHD_Result post_upload_iterator(
+static enum MHD_Result post_nginx_upload_iterator(
     void *cls,
     enum MHD_ValueKind kind,
     const char *key,
@@ -1286,6 +1277,93 @@ error:
   goto exit;
 }
 
+static enum MHD_Result post_snippet_iterator(
+    void *cls,
+    enum MHD_ValueKind kind,
+    const char *key,
+    const char *filename,
+    const char *content_type,
+    const char *transfer_encoding,
+    const char *data,
+    uint64_t off,
+    size_t size) {
+  int ret = MHD_YES;
+  return ret;
+}
+static enum MHD_Result post_upload_iterator(
+    void *cls,
+    enum MHD_ValueKind kind,
+    const char *key,
+    const char *filename,
+    const char *content_type,
+    const char *transfer_encoding,
+    const char *data,
+    uint64_t off,
+    size_t size) {
+  (void)kind;
+  (void)*key;
+  (void)*filename;
+  (void)*content_type;
+  (void)*transfer_encoding;
+  (void)*data;
+  (void)off;
+  int ret = MHD_YES;
+  // LOG_DEBUG("name %s", key);
+  // LOG_DEBUG("data %s", data);
+  // LOG_DEBUG("filename %s", filename);
+  // LOG_DEBUG("cotent_type %s", content_type);
+  // LOG_DEBUG("transfer_encoding %s", transfer_encoding);
+  // LOG_DEBUG("kind %u", kind);
+  // LOG_DEBUG("offset %lu", off);
+  // LOG_DEBUG("size %zu", size);
+
+  struct ConnInfo *ci = cls;
+  struct UploadFile *uf = ci->userp;
+  CHECK(uf != NULL, "Null UploadFile struct");
+
+  if (!strcmp(key, "name")) {
+    if (uf->name == NULL) {
+      uf->name = blk2bstr(data, size);
+      CHECK(uf->name != NULL, "Couldn't get field name");
+      LOG_DEBUG("file name is %s", bdata(uf->name));
+    } else {
+      // we already have name, skip data...
+      goto exit;
+    }
+  } else if (!strcmp(key, "file")) {
+    if (off > 0 && uf->fd == 0) {
+      ci->error = BSS("Cannot upload more than one file");
+      goto exit;
+    }
+    if (uf->filename == NULL) {
+      uf->filename = bfromcstr(filename);
+    }
+    if (uf->fd == 0) {
+      uuid_t _bu = {0};
+      char uuid[37];
+      uuid_generate_random(_bu);
+      uuid_unparse_lower(_bu, uuid);
+      uf->path = bformat("uploads/tmp/%s", uuid);
+      uf->fd = open(bdata(uf->path), O_WRONLY | O_APPEND | O_CREAT, 0644);
+      CHECK(uf->fd > 0, "Couldn't create file");
+    }
+    while (size > 0) {
+      int ret = write(uf->fd, data, size);
+      CHECK(ret > 0, "Couldn't write to file");
+      size -= ret;
+    }
+  } else {
+    // unknown field, skip data...
+    goto exit;
+  }
+
+exit:
+  return ret;
+error:
+  ret = MHD_NO;
+  goto exit;
+}
+
 static enum MHD_Result post_create_snippet_from_multipart_response(
     struct MHD_Connection *connection, struct ConnInfo *ci) {
   struct MHD_Response *response = NULL;
@@ -1324,71 +1402,154 @@ exit:
   return ret;
 }
 
+enum filetype {
+  FT_NONE = 0,
+  FT_DIR,
+  FT_FILE,
+  FT_OTHER,
+  FT_ERR = -1,
+};
+
+static int pathExists(const char *path) {
+  struct stat info;
+  if (stat(path, &info) != 0) {
+    if (errno == ENOENT) {
+      return FT_NONE;
+    } else {
+      // stat failed for some other reason
+      LOG_ERR("stat failed");
+      return FT_ERR;
+    }
+  }
+  if (S_ISREG(info.st_mode)) {
+    return FT_FILE;
+  }
+  if (S_ISDIR(info.st_mode)) {
+    return FT_DIR;
+  }
+  return FT_OTHER;
+}
+
 static enum MHD_Result
 post_upload_response(struct MHD_Connection *connection, struct ConnInfo *ci) {
   int ret;
   int err = 0;
   bstring response_string = NULL;
   bstring new_path = NULL;
+  bstring dirname = NULL;
   struct MHD_Response *response = NULL;
-  UploadFilesVec *v = ci->userp;
-  struct UploadFile *uf = NULL;
+  struct UploadFile *uf = ci->userp;
   struct stat filestat;
+
+  if (uf->filename == NULL) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        BSS("file is required in field file"),
+        ret);
+  }
 
   CHECK(response_string = bfromcstr(""), "Couldn't create string");
 
-  for (size_t i = 0; i < v->n; i++) {
-    uf = rv_get(*v, i, NULL);
-    if (!bdata(uf->name)) {
-      LOG_ERR("NULL filename");
-      continue;
-    }
-    err = stat(bdatae(uf->path, ""), &filestat);
-    if (err) {
-      bformata(
-          response_string, "error getting stat for file %s\n", bdata(uf->path));
-      continue;
-    }
-    if (!S_ISREG(filestat.st_mode)) {
-      bformata(response_string, "file %s is not regular\n", bdata(uf->path));
-      continue;
-    }
-    new_path = bformat("uploads/%s", bdata(uf->name));
-    err = stat(bdatae(new_path, ""), &filestat);
-    if (err == 0 || errno != ENOENT) {
-      LOG_ERR(
-          "destination file %s exists or error getting stat", bdata(new_path));
-      bformata(response_string, "new path %s is wrong\n", bdata(new_path));
-      continue;
-    }
-    err = rename(bdata(uf->path), bdata(new_path));
-    CHECK(err == 0, "Couldn't move file %s", bdata(uf->name));
-    dbw_register_file(ci->app->db_handle, uf->name, new_path, NULL, NULL, &err);
-    if (err != DBW_OK) {
-      bformata(
-          response_string,
-          "Couldn't register %s in DB\n",
-          bdata(uf->field_name));
-    } else {
-      bformata(
-          response_string,
-          "%s ok, new path is %s\n",
-          bdata(uf->field_name),
-          bdata(new_path));
-      uf = NULL;
-    }
+  err = stat(bdatae(uf->path, ""), &filestat);
+  if (err) {
+    bformata(
+        response_string, "error getting stat for file %s\n", bdata(uf->path));
   }
+  if (!S_ISREG(filestat.st_mode)) {
+    bformata(response_string, "file %s is not regular\n", bdata(uf->path));
+  }
+
+  const int uuid_l = 36;
+  dirname =
+      bformat("uploads/%.*s/", 2, &bdata(uf->path)[blength(uf->path) - uuid_l]);
+  CHECK(dirname != NULL, "Couldn't create string");
+  switch (pathExists(bdata(dirname))) {
+  case FT_NONE:
+    if (mkdir(bdata(dirname), 0755) != 0) {
+      LOG_ERR("Couldn't create directory");
+      goto error_500;
+    };
+    break;
+  case FT_ERR:
+    goto error_500;
+  case FT_FILE:
+    LOG_ERR("File %s already exists and is not a directory", bdata(dirname));
+    goto error_500;
+  default:
+    break;
+  }
+
+  bstring filename;
+  if (uf->name) {
+    filename = uf->name;
+  } else if (uf->filename) {
+    filename = uf->filename;
+  } else {
+    LOG_ERR("Missing filename");
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        BSS("missing filename"),
+        ret);
+  }
+  if (validate_static_path(filename)) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection, MHD_HTTP_BAD_REQUEST, response, BSS("wrong filename"), ret);
+  }
+  new_path = dbw_register_file(
+      ci->app->db_handle, uf->path, filename, dirname, NULL, NULL, &err);
+  if (err != DBW_OK) {
+    bformata(response_string, "Couldn't register %s in DB\n", filename);
+  } else {
+    bformata(
+        response_string,
+        "%s ok, new path is %s\n",
+        bdata(filename),
+        bdata(new_path));
+  }
+
+  //  err = stat(bdatae(new_path, ""), &filestat);
+  //  if (err == 0 || errno != ENOENT) {
+  //    LOG_ERR(
+  //        "destination file %s exists or error getting stat",
+  //        bdata(new_path));
+  //    bformata(response_string, "new path %s is wrong\n", bdata(new_path));
+  //  }
+  //  err = rename(bdata(uf->path), bdata(new_path));
+  //  CHECK(err == 0, "Couldn't move file %s", bdata(uf->name));
 
   MHD_RESPONSE_WITH_BSTRING(
       connection, MHD_HTTP_OK, response, response_string, ret);
+
+error_500:
+  if (response_string != NULL) {
+    bdestroy(response_string);
+    response_string = NULL;
+  }
+  MHD_RESPONSE_WITH_TAGBSTRING(
+      connection,
+      MHD_HTTP_INTERNAL_SERVER_ERROR,
+      response,
+      status_server_error,
+      ret);
 
 error:
   ret = MHD_NO;
   goto exit;
 exit:
-  if (new_path) {
+  if (bdata(uf->path) && pathExists(bdata(uf->path)) == FT_FILE) {
+    remove(bdata(uf->path));
+  }
+  if (new_path != NULL) {
     bdestroy(new_path);
   }
+  if (dirname != NULL) {
+    bdestroy(dirname);
+  }
+
   return ret;
 }
 
@@ -1408,10 +1569,39 @@ static enum MHD_Result mhd_api_handle_upload(
         status_method_not_allowed,
         ret);
   }
+  const char *value = MHD_lookup_connection_value(
+      connection, MHD_HEADER_KIND, "Content-Length");
+  if (value == NULL) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        BSS("Content length header is required"),
+        ret);
+  }
+  {
+    int rc = 0;
+    uint32_t cl = 0;
+    PARSE_INT(strtoll, value, cl, rc);
+    if (rc != 0 || cl > MAX_CONTENT_LENGTH) {
+      MHD_RESPONSE_WITH_TAGBSTRING(
+          connection,
+          MHD_HTTP_BAD_REQUEST,
+          response,
+          BSS("Content length too large"),
+          ret);
+    }
+  }
+
   if (ci->invocations == 1) {
     CHECK(ci->pp == NULL, "Post process must be null on first invocation");
-    ci->pp =
-        MHD_create_post_processor(connection, 1024, post_upload_iterator, ci);
+    if (ci->api_call_name == RESTAPI_NGINX_UPLOAD) {
+      ci->pp = MHD_create_post_processor(
+          connection, 1024, post_nginx_upload_iterator, ci);
+    } else {
+      ci->pp =
+          MHD_create_post_processor(connection, 1024, post_upload_iterator, ci);
+    }
     CHECK(ci->pp != NULL, "Couldn't create post processor");
     ret = MHD_YES;
     goto exit;
@@ -1423,9 +1613,9 @@ static enum MHD_Result mhd_api_handle_upload(
       ret = MHD_YES;
       goto exit;
     }
-    CHECK(
-        MHD_post_process(ci->pp, upload_data, *upload_data_size) == MHD_YES,
-        "Could't post_process");
+    if (MHD_post_process(ci->pp, upload_data, *upload_data_size) == MHD_NO) {
+      (LOG_INFO("post processor returned MHD_NO"));
+    }
     *upload_data_size = 0;
     ret = MHD_YES;
     goto exit;
@@ -1623,7 +1813,8 @@ static const struct tagbstring get_dirs_sql =
              "as b on a.id = b.dir_id join dirs as c on b.child_id = c.id  "
              " where a.id = ?");
 static const struct tagbstring get_snippets_sql = bsStatic(
-    "select snippets.id, html_escape(snippets.title), substr(snippets.content, "
+    "select snippets.id, html_escape(snippets.title), "
+    "substr(snippets.content, "
     "1, 50) as content, group_concat(tags.name, ', ') from "
     "snippets left "
     "join snippet_to_tags on snippets.id = snippet_to_tags.snippet_id left "
@@ -1906,8 +2097,11 @@ static int validate_static_path(bstring path) {
   if (binstr(path, 0, &BSS(".."))) {
     return 1;
   }
-  if (blength(path) < 1) {
+  if (binchr(path, 0, &BSS("/"))) {
     return 2;
+  }
+  if (blength(path) < 1 || blength(path) > 255) {
+    return 3;
   }
   return 0;
 }
@@ -2249,7 +2443,6 @@ static void mhd_log(void *cls, const char *fm, va_list ap) {
   (void)cls;
 
   bvalformata(ret, b = bfromcstr(""), fm, ap);
-  LOG_ERR("%s", bdata(b));
 
   if (BSTR_OK == ret) {
     if (bdata(b) != NULL && blength(b) > 0) {
@@ -2450,6 +2643,8 @@ static int mhd_handler(
 
     if (!strcmp(url, "/command")) {
       call_name = RESTAPI_COMMAND;
+    } else if (!strcmp(url, "/upload")) {
+      call_name = RESTAPI_UPLOAD;
     } else if (!strcmp(url, "/api/get_snippet")) {
       call_name = RESTAPI_GET_SNIPPET;
     } else if (!strcmp(url, "/api/create_snippet")) {
@@ -2459,7 +2654,7 @@ static int mhd_handler(
     } else if (!strcmp(url, "/api/delete_snippet")) {
       call_name = RESTAPI_DELETE_SNIPPET;
     } else if (!strcmp(url, "/api/upload")) {
-      call_name = RESTAPI_UPLOAD;
+      call_name = RESTAPI_NGINX_UPLOAD;
     } else if (strstartswith(url, "/static/")) {
       call_name = RESTAPI_STATIC;
     } else if (strstartswith(url, "/get_snippet/")) {
@@ -2523,6 +2718,7 @@ static int mhd_handler(
     ret = mhd_api_handle_static(connection, ci);
     goto exit;
   case RESTAPI_UPLOAD:
+  case RESTAPI_NGINX_UPLOAD:
     ret = mhd_api_handle_upload(connection, ci, upload_data, upload_data_size);
     goto exit;
   case HTTP_PATH_LUA:
@@ -2542,8 +2738,7 @@ static int mhd_handler(
     }
   case RESTAPI_UNKNOWN:
   default:
-    MHD_RESPONSE_REDIRECT_TB(
-        connection, MHD_HTTP_FOUND, &BSS("/root"), ret);
+    MHD_RESPONSE_REDIRECT_TB(connection, MHD_HTTP_FOUND, &BSS("/root"), ret);
   }
 exit:
   LOG_DEBUG("ret is %d, uri is %s, method %s", ret, url, method);

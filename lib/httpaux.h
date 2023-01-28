@@ -12,9 +12,11 @@
   (!strncmp((haystack), (needle), strlen(needle)))
 
 struct UploadFile {
+  bstring filename;
   bstring field_name;
   bstring name;
   bstring path;
+  int fd;
 };
 
 typedef rvec_t(struct UploadFile) UploadFilesVec;
@@ -22,6 +24,7 @@ typedef rvec_t(struct UploadFile) UploadFilesVec;
 enum ConnInfoType {
   CIT_POST_RAW,
   CIT_POST_UPLOAD_FORM,
+  CIT_POST_FILE_FORM,
   CIT_POST_SNIPPET_FORM,
   CIT_OTHER,
 };
@@ -33,6 +36,7 @@ enum HTTPServerCallName {
   RESTAPI_DELETE_SNIPPET,
   RESTAPI_FIND_SNIPPETS,
   RESTAPI_UPLOAD,
+  RESTAPI_NGINX_UPLOAD,
   RESTAPI_STATIC,
   RESTAPI_COMMAND,
   HTTP_PATH_GET_SNIPPET,

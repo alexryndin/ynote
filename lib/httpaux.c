@@ -15,6 +15,9 @@ static void UploadFile_destroy(struct UploadFile uf) {
   if (uf.path) {
     bdestroy(uf.path);
   }
+  if (uf.fd) {
+    close(uf.fd);
+  }
   return;
 }
 
@@ -110,6 +113,8 @@ struct ConnInfo *ConnInfo_create(
   }
   if (method_name == HTTP_METHOD_POST) {
     if (call_name == RESTAPI_UPLOAD) {
+      cit = CIT_POST_FILE_FORM;
+    } else if (call_name == RESTAPI_NGINX_UPLOAD) {
       cit = CIT_POST_UPLOAD_FORM;
     } else if (
         call_name == RESTAPI_CREATE_SNIPPET &&
@@ -126,6 +131,10 @@ struct ConnInfo *ConnInfo_create(
   } else if (cit == CIT_POST_UPLOAD_FORM) {
     CHECK(
         (ci->userp = calloc(1, sizeof(UploadFilesVec))) != NULL,
+        "Couldn't create con_cls");
+  } else if (cit == CIT_POST_FILE_FORM) {
+    CHECK(
+        (ci->userp = calloc(1, sizeof(struct UploadFile))) != NULL,
         "Couldn't create con_cls");
   }
 
