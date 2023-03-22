@@ -151,8 +151,10 @@ bstring dbw_register_file(
     DBWHandler *h,
     const bstring path,
     const bstring filename,
+    const bstring uploads_path,
     const bstring location,
     const bstring type,
+    const bstring mime,
     const bstrListEmb *tags,
     int *err);
 

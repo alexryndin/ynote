@@ -15,6 +15,9 @@ static void UploadFile_destroy(struct UploadFile uf) {
   if (uf.path) {
     bdestroy(uf.path);
   }
+  if (uf.mime) {
+    bdestroy(uf.mime);
+  }
   if (uf.fd) {
     close(uf.fd);
   }
@@ -22,30 +25,38 @@ static void UploadFile_destroy(struct UploadFile uf) {
 }
 
 void ConnInfo_destroy(struct ConnInfo *ci) {
-  if (ci != NULL) {
-    if (ci->userp != NULL) {
-      if (ci->type == CIT_POST_RAW) {
-        bdestroy((bstring)(ci->userp));
-      } else if (ci->type == CIT_POST_UPLOAD_FORM) {
-        UploadFilesVec *v = ci->userp;
-        for (size_t i = 0; i < v->n; i++) {
-          struct UploadFile *uf = NULL;
-          uf = rv_get(*v, i, NULL);
-          if (uf != NULL) {
-            UploadFile_destroy(*uf);
-          } else {
-            LOG_ERR("UploadFile must not be null here");
-          }
-        }
-        rv_destroy(*(UploadFilesVec *)(ci->userp));
-        free(ci->userp);
-      }
-    }
-    if (ci->pp != NULL) {
-      MHD_destroy_post_processor(ci->pp);
-    }
-    free(ci);
+  if (ci == NULL) {
+    return;
   }
+  if (ci->userp != NULL) {
+    switch (ci->type) {
+    case CIT_POST_RAW:
+      bdestroy((bstring)(ci->userp));
+      break;
+    case CIT_POST_UPLOAD_FORM: {
+      UploadFilesVec *v = ci->userp;
+      for (size_t i = 0; i < v->n; i++) {
+        struct UploadFile *uf = NULL;
+        uf = rv_get(*v, i, NULL);
+        if (uf != NULL) {
+          UploadFile_destroy(*uf);
+        } else {
+          LOG_ERR("UploadFile must not be null here");
+        }
+      }
+      rv_destroy(*(UploadFilesVec *)(ci->userp));
+      free(ci->userp);
+    } break;
+    case CIT_POST_FIELDS: {
+      BPairs *v = ci->userp;
+      BPairs_destroy(v);
+    }; break;
+    }
+  }
+  if (ci->pp != NULL) {
+    MHD_destroy_post_processor(ci->pp);
+  }
+  free(ci);
 }
 
 struct ConnInfo *ConnInfo_create(
@@ -116,6 +127,8 @@ struct ConnInfo *ConnInfo_create(
       cit = CIT_POST_FILE_FORM;
     } else if (call_name == RESTAPI_NGINX_UPLOAD) {
       cit = CIT_POST_UPLOAD_FORM;
+    } else if (call_name == RESTAPI_UNSORTED) {
+      cit = CIT_POST_FIELDS;
     } else if (
         call_name == RESTAPI_CREATE_SNIPPET &&
         cit == HTTP_CONTENT_MULTIPART_FORM_DATA) {
@@ -126,16 +139,25 @@ struct ConnInfo *ConnInfo_create(
   } else {
     cit = CIT_OTHER;
   }
-  if (cit == CIT_POST_RAW) {
+  switch (cit) {
+  case CIT_POST_RAW: {
     CHECK((ci->userp = bfromcstr("")) != NULL, "Couldn't create con_cls");
-  } else if (cit == CIT_POST_UPLOAD_FORM) {
+  }; break;
+  case CIT_POST_UPLOAD_FORM: {
     CHECK(
         (ci->userp = calloc(1, sizeof(UploadFilesVec))) != NULL,
         "Couldn't create con_cls");
-  } else if (cit == CIT_POST_FILE_FORM) {
+  }; break;
+  case CIT_POST_FILE_FORM: {
     CHECK(
         (ci->userp = calloc(1, sizeof(struct UploadFile))) != NULL,
         "Couldn't create con_cls");
+  }; break;
+  case CIT_POST_FIELDS: {
+    CHECK((ci->userp = BPairs_create()) != NULL, "Couldn't create con_cls");
+  }; break;
+  default:
+    break;
   }
 
   ci->type = cit;
@@ -220,6 +242,21 @@ exit:
 error:
   goto exit;
 }
+static int l_get_whole_form(lua_State *lua) {
+  int ret = 0;
+  luaL_checktype(lua, 1, LUA_TLIGHTUSERDATA);
+  struct LuaCtx *luactx = (struct LuaCtx *)lua_touserdata(lua, 1);
+  struct ConnInfo *ci = ynote_get_conn_info(luactx);
+  BPairs *bps = ci->userp;
+  lua_newtable(lua);
+  for (size_t i = 0; i < bps->n; i++) {
+    struct BPair *bp = rv_get(*bps, i, NULL);
+    lua_pushstring(lua, bdata(bp->k));
+    lua_pushstring(lua, bdata(bp->v));
+    lua_rawset(lua, -3);
+  }
+  return 1;
+}
 
 static const struct luaL_Reg httpaux[] = {
     {"get_path", l_get_path},
@@ -227,6 +264,7 @@ static const struct luaL_Reg httpaux[] = {
     {"get_method", l_get_method},
     {"get_port", l_get_port},
     {"get_body", l_get_body},
+    {"get_whole_form", l_get_whole_form},
     {NULL, NULL}};
 
 void register_httpauxlib(lua_State *lua) {

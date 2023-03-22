@@ -13,17 +13,25 @@
 
 struct UploadFile {
   bstring filename;
+  bstring mime;
   bstring field_name;
   bstring name;
   bstring path;
   int fd;
 };
 
+struct PostField {
+  bstring key;
+  bstring value;
+};
+
 typedef rvec_t(struct UploadFile) UploadFilesVec;
+typedef rvec_t(struct PostFields) PostFieldsVec;
 
 enum ConnInfoType {
   CIT_POST_RAW,
   CIT_POST_UPLOAD_FORM,
+  CIT_POST_FIELDS,
   CIT_POST_FILE_FORM,
   CIT_POST_SNIPPET_FORM,
   CIT_OTHER,
@@ -36,9 +44,12 @@ enum HTTPServerCallName {
   RESTAPI_DELETE_SNIPPET,
   RESTAPI_FIND_SNIPPETS,
   RESTAPI_UPLOAD,
+  RESTAPI_UNSORTED,
   RESTAPI_NGINX_UPLOAD,
   RESTAPI_STATIC,
+  RESTAPI_STATIC_UPLOADED,
   RESTAPI_COMMAND,
+  RESTAPI_GET_FILE,
   HTTP_PATH_GET_SNIPPET,
   HTTP_PATH_INDEX,
   HTTP_PATH_LUA,

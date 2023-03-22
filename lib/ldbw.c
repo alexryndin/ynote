@@ -3,6 +3,7 @@
 #include <ldbw.h>
 #include <sqlite3.h>
 #include <ynote.h>
+#include <bbstrlib.h>
 
 struct LDBWCtx *LDBWCtx_create() {
   struct LDBWCtx *ret = calloc(1, sizeof(struct LDBWCtx));
@@ -261,97 +262,6 @@ error:
   goto exit;
 }
 
-struct BPair {
-  struct tagbstring k;
-  struct tagbstring v;
-};
-
-typedef rvec_t(struct BPair) BPairs;
-
-void BPairs_destroy(BPairs *bp) {
-  if (bp != NULL) {
-    rv_destroy(*bp);
-    free(bp);
-  }
-}
-
-static BPairs *bsplittopairs_noalloc(bstring s) {
-  BPairs *ret = NULL;
-  bstrListEmb *strsplit = NULL;
-  int err = RV_ERR_OK;
-
-  CHECK(s != NULL, "NULL string");
-
-  ret = calloc(1, sizeof(BPairs));
-  CHECK_MEM(ret);
-
-  strsplit = bsplit_noalloc(s, '\n');
-  CHECK(strsplit != NULL, "Couldn't split string");
-  for (int i = 0; i < strsplit->n; i++) {
-    struct BPair pair = {0};
-    struct tagbstring k = {0};
-    struct tagbstring v = {0};
-    int delim_pos = 0;
-    if (blength(&strsplit->a[i]) < 1) {
-      continue;
-    }
-    delim_pos = binchr(&strsplit->a[i], 1, &(struct tagbstring)bsStatic("="));
-    if (delim_pos != BSTR_ERR) {
-      bmid2tbstr(k, &strsplit->a[i], 0, delim_pos);
-      bmid2tbstr(v, &strsplit->a[i], delim_pos + 1, blength(&strsplit->a[i]));
-      if (blength(&k) > 0) {
-        CHECK(tbtrimws(&k) == BSTR_OK, "Couldn't trim string");
-      }
-      if (blength(&v) > 0) {
-        CHECK(tbtrimws(&v) == BSTR_OK, "Couldn't trim string");
-      }
-      pair.k = k;
-      pair.v = v;
-      rv_push(*ret, pair, &err);
-      CHECK(err == RV_ERR_OK, "Couldn't push value to vec");
-    }
-  }
-
-exit:
-  if (strsplit != NULL) {
-    bstrListEmb_destroy(strsplit);
-  }
-  return ret;
-error:
-  if (ret != NULL) {
-    rv_destroy(*ret);
-    free(ret);
-  }
-  ret = NULL;
-  goto exit;
-}
-
-static bstring BPairs_get(BPairs *bp, bstring key) {
-  CHECK(key != NULL, "Null key");
-  CHECK(bp != NULL, "Null bp");
-
-  for (size_t i = 0; i < bp->n; i++) {
-    if (!bstrcmp(&bp->a[i].k, key)) {
-      return &bp->a[i].v;
-    }
-  }
-error:
-  return NULL;
-}
-
-static bstring BPairs_get_copy(BPairs *bp, bstring key, int *err) {
-  bstring ret = NULL;
-  ret = BPairs_get(bp, key);
-  if (ret != NULL) {
-    ret = bstrcpy(ret);
-    CHECK_MEM(ret);
-  }
-error:
-  if (ret != NULL) {
-    bdestroy(ret);
-  }
-  return NULL;
-}
 
 static int l_post_create_snippet_from_raw_response(lua_State *lua) {
   int ret = 0;
@@ -372,7 +282,7 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
   bstrListEmb *tagslist = NULL;
   bstrListEmb tagslist_noempty = {0};
 
-  BPairs *bp = NULL;
+  TBPairs *bp = NULL;
 
   struct tagbstring toml = {0};
   int err = 0;
@@ -413,9 +323,9 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
   bp = bsplittopairs_noalloc(&toml);
   bmid2tbstr(body, &body, toml_end + border_len, blength(&body));
 
-  title = BPairs_get(bp, &BSS("title"));
-  tags = BPairs_get(bp, &BSS("tags"));
-  type = BPairs_get(bp, &BSS("type"));
+  title = TBPairs_get(bp, &BSS("title"));
+  tags = TBPairs_get(bp, &BSS("tags"));
+  type = TBPairs_get(bp, &BSS("type"));
 
   if (bdata(title) == NULL || bdata(type) == NULL) {
     lua_pushnil(lua);
@@ -483,7 +393,7 @@ static int l_post_create_snippet_from_raw_response(lua_State *lua) {
   // fallthrough
 exit:
   if (bp != NULL) {
-    BPairs_destroy(bp);
+    TBPairs_destroy(bp);
   }
   if (tagslist != NULL) {
     bstrListEmb_destroy(tagslist);

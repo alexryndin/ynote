@@ -35,8 +35,9 @@ static const struct tagbstring _insert_snippet_sql =
     bsStatic("INSERT INTO " SNIPPETS_TABLE
              " (title, content, type, dir) VALUES (?, ?, ?, ?) RETURNING id");
 
-static const struct tagbstring _insert_file_sql = bsStatic(
-    "INSERT INTO " FILES_TABLE " (name, location) VALUES (?, ?) RETURNING id");
+static const struct tagbstring _insert_file_sql =
+    bsStatic("INSERT INTO " FILES_TABLE
+             " (name, location, type) VALUES (?, ?, ?) RETURNING id");
 
 static const struct tagbstring _update_snippet_sql =
     bsStatic("UPDATE " SNIPPETS_TABLE " SET updated = datetime(), deleted =  ");
@@ -1357,7 +1358,10 @@ static bstring sqlite3_register_file(
     DBWHandler *h,
     const bstring path,
     const bstring filename,
+    const bstring uploads_path,
     const bstring location,
+    const bstring type,
+    const bstring mime,
     const bstrListEmb *tags,
     int *ret_err) {
   int err = 0;
@@ -1371,14 +1375,37 @@ static bstring sqlite3_register_file(
   bstring question_marks = NULL;
   bstring new_path = NULL;
 
-  // Step 1: ensure all tags are present in tags table
+  // Step 1: get corresponding file type
+  const struct tagbstring sql =
+      bsStatic("SELECT id from file_types where mime = ?;");
+
+  CHECK(
+      sqlite3_prepare_v2(
+          h->conn, bdata(&sql), blength(&sql) + 1, &stmt, NULL) == SQLITE_OK,
+      "Couldn't prepare statement: %s",
+      sqlite3_errmsg(h->conn));
+
+  CHECK(
+      sqlite3_bind_text(stmt, 1, bdata(mime), -1, NULL) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
+  CHECK(
+      sqlite3_step(stmt) == SQLITE_ROW,
+      "Couldn't get snippet type %s",
+      bdata(type));
+
+  type_id = sqlite3_column_int64(stmt, 0);
+  CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
+  stmt = NULL;
+
+  // Step 2: ensure all tags are present in tags table
   if (tags && rv_len(*tags) > 0) {
     struct tagbstring tags_table_name = bsStatic(TAGS_TABLE);
     CHECK(
         sqlite3_ensure_tags(h, &tags_table_name, tags) == DBW_OK,
         "Couldn't insert tags");
   }
-  // Step 2: insert file
+  // Step 3: insert file
   CHECK(
       sqlite3_prepare_v2(
           h->conn,
@@ -1397,6 +1424,10 @@ static bstring sqlite3_register_file(
       sqlite3_bind_text(stmt, 2, bdata(location), -1, NULL) == SQLITE_OK,
       "Couldn't bind parameter to statement");
 
+  CHECK(
+      sqlite3_bind_int64(stmt, 3, type_id) == SQLITE_OK,
+      "Couldn't bind parameter to statement");
+
   err = sqlite3_step(stmt);
   if (err != SQLITE_ROW) {
     LOG_ERR("Couldn't insert snippet, %s", sqlite3_errmsg(h->conn));
@@ -1410,8 +1441,14 @@ static bstring sqlite3_register_file(
   CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "Couldn't finalize statement");
   stmt = NULL;
 
-  new_path = bformat("%s%lld_%s", bdata(location), file_id, bdata(filename));
+  new_path = bformat(
+      "%s/%s/%lld_%s",
+      bdata(uploads_path),
+      bdata(location),
+      file_id,
+      bdata(filename));
   CHECK(new_path != NULL, "Couldn't create string");
+  LOG_DEBUG("new path is %s", bdata(new_path));
   CHECK(rename(bdata(path), bdata(new_path)) == 0, "Couldn't rename file");
 
   // Step 3: bind file to tags
@@ -1440,6 +1477,10 @@ exit:
 error:
   if (ret_err != NULL && *ret_err == DBW_OK) {
     *ret_err = rc == DBW_OK ? DBW_ERR : rc;
+  }
+  if (new_path != NULL) {
+    bdestroy(new_path);
+    new_path = NULL;
   }
   goto exit;
 }
@@ -1989,14 +2030,19 @@ bstring dbw_register_file(
     DBWHandler *h,
     const bstring path,
     const bstring filename,
+    const bstring uploads_path,
     const bstring location,
     const bstring type,
+    const bstring mime,
     const bstrListEmb *tags,
     int *err) {
   CHECK(path != NULL, "Path to file is required");
+  CHECK(mime != NULL, "MIME is required");
+  CHECK(uploads_path != NULL, "uploads_path is required");
 
   if (h->DBWDBType == DBW_SQLITE3)
-    return sqlite3_register_file(h, path, filename, location, tags, err);
+    return sqlite3_register_file(
+        h, path, filename, uploads_path, location, type, mime, tags, err);
   else {
     if (err != NULL) {
       *err = DBW_ERR_UNKN_DB;

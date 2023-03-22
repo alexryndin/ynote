@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS snippets (
   created DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
   updated DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
   deleted BOOL DEFAULT FALSE NOT NULL,
+  unsorted BOOL DEFAULT FALSE NOT NULL,
   FOREIGN KEY(type) REFERENCES snippet_types(id),
   FOREIGN KEY(dir) REFERENCES dirs(id)
 );
@@ -43,13 +44,21 @@ CREATE TABLE IF NOT EXISTS dirs (
   UNIQUE(parent_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS file_types (
+  id INTEGER NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL UNIQUE,
+  UNIQUE(name, mime)
+);
 
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER NOT NULL PRIMARY KEY,
   name TEXT NOT NULL,
   location TEXT UNIQUE NOT NULL,
+  type INTEGER NOT NULL,
   created DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated DATETIME DEFAULT CURRENT_TIMESTAMP
+  updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(type) REFERENCES file_types(id)
 );
 
 CREATE TABLE IF NOT EXISTS files_to_tags (
@@ -139,6 +148,8 @@ INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (1,1);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (1,2);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (2,2);
 INSERT INTO snippet_to_tags (snippet_id, tag_id) VALUES (4,3);
+INSERT INTO file_types (name, mime) VALUES ("png", "image/png");
+INSERT INTO file_types (name, mime) VALUES ("text", "application/octet-stream");
 
 INSERT INTO dirs(id, name, parent_id) VALUES (1, "root", 1), (2, "codes", 1);
 

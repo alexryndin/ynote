@@ -260,6 +260,10 @@ GROUP BY snippets.id;]]
   return pages.index_snippets(s, path, message)
 end
 
+function pages.get_file(ud, id, message)
+  local q = [[select format("%s%d_%s",location, id, name) from  files;]]
+end
+
 function pages.get_snippet(ud, id, edit_mode, snippet_dir, message)
   local q = [[SELECT snippets.id as id,
                  title,]]

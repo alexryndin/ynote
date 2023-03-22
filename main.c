@@ -98,12 +98,21 @@ static const char *const sendMessagelUrl =
                                                  \
   } while (0)
 
-#define LUA_CONF_READ_STRING(dst, src)               \
+#define LUA_CONF_READ_STRING(dst, src, _default)     \
   do {                                               \
     switch (lua_getglobal((app->lua), #src)) {       \
     case LUA_TNIL:                                   \
-      LOG_ERR("Failed to read " #src);               \
-      goto error;                                    \
+      if ((_default)) {                              \
+        dst = bstrcpy(_default);                     \
+        if (dst == NULL) {                           \
+          LOG_ERR("Failed to copy string");          \
+          goto error;                                \
+        }                                            \
+      } else {                                       \
+        LOG_ERR("Failed to read " #src);             \
+        goto error;                                  \
+      }                                              \
+      break;                                         \
     case LUA_TSTRING:                                \
       (dst) = bfromcstr(lua_tostring(app->lua, -1)); \
       CHECK((dst) != NULL, "Failed to read " #src);  \
@@ -171,6 +180,7 @@ struct YNoteApp {
   DBWHandler *db_handle;
   CURLM *curl_multi;
   bstring tg_token;
+  bstring uploads_path;
   struct event *http_client_timer_event;
   int http_clients_running;
   bstring dbpath;
@@ -180,6 +190,13 @@ struct YNoteApp {
 };
 
 static int validate_static_path(bstring path);
+static int validate_filename(bstring path);
+static enum MHD_Result mhd_handle_lua(
+    struct MHD_Connection *connection,
+    struct ConnInfo *ci,
+    bstring script_path,
+    const char *upload_data,
+    size_t *upload_data_size);
 
 DBWHandler *ynote_get_db_handle(struct LuaCtx *luactx) {
   if (luactx == NULL) {
@@ -956,9 +973,11 @@ static int read_config(struct YNoteApp *app, bstring path) {
 
   LUA_CONF_READ_BOOL(app->tg_bot_enabled, tg_bot_enabled, 1);
   if (app->tg_bot_enabled) {
-    LUA_CONF_READ_STRING(app->tg_token, tg_token);
+    LUA_CONF_READ_STRING(app->tg_token, tg_token, NULL);
   }
-  LUA_CONF_READ_STRING(app->dbpath, dbpath);
+  LUA_CONF_READ_STRING(app->dbpath, dbpath, NULL);
+
+  LUA_CONF_READ_STRING(app->uploads_path, uploads_path, &BSS("uploads"));
 
   LUA_CONF_READ_NUMBER(app->client_timeout, client_timeout, 30);
 
@@ -1290,6 +1309,72 @@ static enum MHD_Result post_snippet_iterator(
   int ret = MHD_YES;
   return ret;
 }
+static enum MHD_Result post_fields_iterator(
+    void *cls,
+    enum MHD_ValueKind kind,
+    const char *key,
+    const char *filename,
+    const char *content_type,
+    const char *transfer_encoding,
+    const char *data,
+    uint64_t off,
+    size_t size) {
+  (void)kind;
+  (void)*key;
+  (void)*filename;
+  (void)*content_type;
+  (void)*transfer_encoding;
+  (void)*data;
+  (void)off;
+  int ret = MHD_YES;
+
+  int err = 0;
+  struct ConnInfo *ci = cls;
+  BPairs *uf = ci->userp;
+  struct BPair newbp = {0};
+  CHECK(uf != NULL, "Null UploadFile struct");
+  struct tagbstring tkey = {0};
+  cstr2tbstr(tkey, key);
+
+  if (filename != NULL) {
+    ci->error = BSS("Files are not expected to be recieved");
+    goto error;
+  }
+
+  bstring value = BPairs_get(uf, &tkey);
+  if (!value) {
+    newbp.k = bfromcstr(key);
+    CHECK(newbp.k != NULL, "Couldn't create string");
+    newbp.v = bfromcstr("");
+    CHECK(newbp.v != NULL, "Couldn't create string");
+    value = newbp.v;
+    rv_push(*uf, newbp, &err);
+    if (err != RV_ERR_OK) {
+      ci->error = BSS("Couldn't insert data to a vector");
+      goto error;
+    }
+  }
+
+  err = bcatblk(value, data, size);
+  if (err != BSTR_OK) {
+    ci->error = BSS("Couldn't concatetate data to a buffer");
+    goto error;
+  }
+
+exit:
+  return ret;
+error:
+  if (newbp.k != NULL) {
+    bdestroy(newbp.k);
+    newbp.k = NULL;
+  }
+  if (newbp.v != NULL) {
+    bdestroy(newbp.v);
+    newbp.v = NULL;
+  }
+  ret = MHD_NO;
+  goto exit;
+}
 static enum MHD_Result post_upload_iterator(
     void *cls,
     enum MHD_ValueKind kind,
@@ -1331,6 +1416,14 @@ static enum MHD_Result post_upload_iterator(
       goto exit;
     }
   } else if (!strcmp(key, "file")) {
+    if (content_type == NULL) {
+      ci->error = BSS("content-type is required");
+    }
+    if (uf->mime == NULL) {
+      uf->mime = bfromcstr(content_type);
+      CHECK(uf->mime != NULL, "Couldn't create string");
+    }
+
     if (off > 0 && uf->fd == 0) {
       ci->error = BSS("Cannot upload more than one file");
       goto exit;
@@ -1343,7 +1436,8 @@ static enum MHD_Result post_upload_iterator(
       char uuid[37];
       uuid_generate_random(_bu);
       uuid_unparse_lower(_bu, uuid);
-      uf->path = bformat("uploads/tmp/%s", uuid);
+      uf->path = bformat("%s/tmp/%s", bdata(ci->app->uploads_path), uuid);
+      CHECK(uf->path != NULL, "Coudln't create string");
       uf->fd = open(bdata(uf->path), O_WRONLY | O_APPEND | O_CREAT, 0644);
       CHECK(uf->fd > 0, "Couldn't create file");
     }
@@ -1462,8 +1556,11 @@ post_upload_response(struct MHD_Connection *connection, struct ConnInfo *ci) {
   }
 
   const int uuid_l = 36;
-  dirname =
-      bformat("uploads/%.*s/", 2, &bdata(uf->path)[blength(uf->path) - uuid_l]);
+  dirname = bformat(
+      "%s/%.*s/",
+      bdata(ci->app->uploads_path),
+      2,
+      &bdata(uf->path)[blength(uf->path) - uuid_l]);
   CHECK(dirname != NULL, "Couldn't create string");
   switch (pathExists(bdata(dirname))) {
   case FT_NONE:
@@ -1495,12 +1592,20 @@ post_upload_response(struct MHD_Connection *connection, struct ConnInfo *ci) {
         BSS("missing filename"),
         ret);
   }
-  if (validate_static_path(filename)) {
+  if (validate_filename(filename)) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, BSS("wrong filename"), ret);
   }
   new_path = dbw_register_file(
-      ci->app->db_handle, uf->path, filename, dirname, NULL, NULL, &err);
+      ci->app->db_handle,
+      uf->path,
+      filename,
+      dirname,
+      ci->app->uploads_path,
+      NULL,
+      uf->mime,
+      NULL,
+      &err);
   if (err != DBW_OK) {
     bformata(response_string, "Couldn't register %s in DB\n", filename);
   } else {
@@ -1553,6 +1658,66 @@ exit:
   return ret;
 }
 
+static enum MHD_Result do_post_process(
+    struct MHD_Connection *connection,
+    struct ConnInfo *ci,
+    const char *upload_data,
+    size_t *upload_data_size) {
+  int ret = MHD_NO;
+  if (ci->method_name != HTTP_METHOD_POST) {
+    LOG_ERR("post process invoked for a non post method");
+    ci->error = status_server_error;
+  }
+  if (ci->invocations == 1) {
+    CHECK(ci->pp == NULL, "Post process must be null on first invocation");
+    ci->pp =
+        MHD_create_post_processor(connection, 1024, post_fields_iterator, ci);
+    CHECK(ci->pp != NULL, "Couldn't create post processor");
+    ret = MHD_YES;
+    goto exit;
+  }
+  if (MHD_post_process(ci->pp, upload_data, *upload_data_size) == MHD_NO) {
+    (LOG_INFO("post processor returned MHD_NO"));
+  }
+  *upload_data_size = 0;
+  ret = MHD_YES;
+  goto exit;
+error:
+  ci->error = status_server_error;
+  ret = MHD_YES;
+exit:
+  return ret;
+}
+
+static enum MHD_Result mhd_api_handle_unsorted(
+    struct MHD_Connection *connection,
+    struct ConnInfo *ci,
+    const char *upload_data,
+    size_t *upload_data_size) {
+  struct MHD_Response *response = NULL;
+  int ret = MHD_NO;
+  if (ci->method_name != HTTP_METHOD_POST &&
+      ci->method_name != HTTP_METHOD_GET) {
+    MHD_RESPONSE_WITH_TAGBSTRING(
+        connection,
+        MHD_HTTP_BAD_REQUEST,
+        response,
+        status_method_not_allowed,
+        ret);
+  }
+  return mhd_handle_lua(
+      connection,
+      ci,
+      &BSS("luahttp/unsorted.lua"),
+      upload_data,
+      upload_data_size);
+  goto exit;
+exit:
+  return ret;
+error:
+  ret = MHD_NO;
+  goto exit;
+}
 static enum MHD_Result mhd_api_handle_upload(
     struct MHD_Connection *connection,
     struct ConnInfo *ci,
@@ -2094,20 +2259,30 @@ static int validate_static_path(bstring path) {
   if (bdata(path) == NULL) {
     return -1;
   }
-  if (binstr(path, 0, &BSS(".."))) {
+  if (binstr(path, 0, &BSS("..")) != BSTR_ERR) {
     return 1;
-  }
-  if (binchr(path, 0, &BSS("/"))) {
-    return 2;
-  }
-  if (blength(path) < 1 || blength(path) > 255) {
-    return 3;
   }
   return 0;
 }
 
-static enum MHD_Result
-mhd_api_handle_static(struct MHD_Connection *connection, struct ConnInfo *ci) {
+static int validate_filename(bstring path) {
+  if (bdata(path) == NULL) {
+    return -1;
+  }
+  if (blength(path) < 1 || blength(path) > 255) {
+    return 3;
+  }
+  if (binchr(path, 0, &BSS("/")) != BSTR_ERR) {
+    return 2;
+  }
+  return validate_static_path(path);
+}
+
+static enum MHD_Result mhd_api_handle_static(
+    struct MHD_Connection *connection,
+    bstring prefix,
+    bstring localpath,
+    struct ConnInfo *ci) {
   int ret = MHD_NO;
   int fd = 0;
   struct stat filestat;
@@ -2121,21 +2296,21 @@ mhd_api_handle_static(struct MHD_Connection *connection, struct ConnInfo *ci) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
   }
-  if ((!strncmp(bdata(&tburl), "/static/", strlen("/static/")))) {
-    bmid2tbstr(tbpath, &tburl, strlen("/static/"), blength(&tburl));
+  if (prefix && bstrstartswith(&tburl, prefix)) {
+    bmid2tbstr(tbpath, &tburl, blength(prefix), blength(&tburl));
   } else {
     tbpath = tburl;
   }
 
-  if (!validate_static_path(&tbpath)) {
+  if (validate_static_path(&tbpath)) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
   }
 
-  path = bformat("static/www/%s", bdata(&tbpath));
+  path = bformat("%s/%s", bdata(localpath), bdata(&tbpath));
   CHECK(path != NULL, "Null path");
 
-  if (!validate_static_path(&tbpath)) {
+  if (validate_static_path(path)) {
     MHD_RESPONSE_WITH_TAGBSTRING(
         connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
   }
@@ -2517,9 +2692,11 @@ error:
   goto exit;
 }
 
+// Do not pass user defined script_path here
 static enum MHD_Result mhd_handle_lua(
     struct MHD_Connection *connection,
     struct ConnInfo *ci,
+    bstring script_path,
     const char *upload_data,
     size_t *upload_data_size) {
   struct MHD_Response *response = NULL;
@@ -2529,38 +2706,43 @@ static enum MHD_Result mhd_handle_lua(
   int status = MHD_HTTP_OK;
   int ret = MHD_NO;
   bstring resp_str = NULL;
-  bstring path = NULL;
+  bstring _script_path = NULL;
   lua_State *lua = ci->app->lua;
 
   ldbwctx = LDBWCtx_create();
   CHECK(ldbwctx != NULL, "Couldn't create database context");
 
-  if (ci->api_call_name != HTTP_PATH_INDEX) {
-    btfromcstr(tbpath, ci->url);
-    if (!validate_static_path(&tbpath)) {
-      MHD_RESPONSE_WITH_TAGBSTRING(
-          connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
-    }
-    if (!bstrstartswith(&tbpath, &BSS("/lua/"))) {
-      MHD_RESPONSE_WITH_TAGBSTRING(
-          connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
-    }
+  if (script_path == NULL) {
+    if (ci->api_call_name != HTTP_PATH_INDEX) {
+      btfromcstr(tbpath, ci->url);
+      if (validate_static_path(&tbpath)) {
+        MHD_RESPONSE_WITH_TAGBSTRING(
+            connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+      }
+      if (!bstrstartswith(&tbpath, &BSS("/lua/"))) {
+        MHD_RESPONSE_WITH_TAGBSTRING(
+            connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+      }
 
-    bmid2tbstr(tbpath, &tbpath, strlen("/lua/"), blength(&tbpath));
+      bmid2tbstr(tbpath, &tbpath, strlen("/lua/"), blength(&tbpath));
 
-    if (bstrendswith(&tbpath, &BSS(".lua"))) {
-      path = bformat("luahttp/%s", bdata(&tbpath));
-    } else if (bstrstartswith(&tbpath, &BSS("get_snippet/"))) {
-      path = bformat("luahttp/%s", "get_snippet.lua");
+      if (bstrendswith(&tbpath, &BSS(".lua"))) {
+        _script_path = bformat("luahttp/%s", bdata(&tbpath));
+      } else if (bstrstartswith(&tbpath, &BSS("get_snippet/"))) {
+        _script_path = bformat("luahttp/%s", "get_snippet.lua");
+      } else {
+        MHD_RESPONSE_WITH_TAGBSTRING(
+            connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+      }
     } else {
-      MHD_RESPONSE_WITH_TAGBSTRING(
-          connection, MHD_HTTP_BAD_REQUEST, response, status_wrong_path, ret);
+      _script_path = bformat("luahttp/%s", "index.lua");
     }
   } else {
-    path = bformat("luahttp/%s", "index.lua");
+    _script_path = bstrcpy(script_path);
   }
-  CHECK(path != NULL, "Null path");
-  status = ynote_lua_check_and_execute_file(connection, ci, bdata(path));
+  CHECK(_script_path != NULL, "Null path");
+  status =
+      ynote_lua_check_and_execute_file(connection, ci, bdata(_script_path));
 
   switch (status) {
   case -1:
@@ -2575,13 +2757,17 @@ static enum MHD_Result mhd_handle_lua(
   resp_str = blk2bstr(lua_tostring(lua, -3), lua_rawlen(lua, -3));
   CHECK(resp_str != NULL, "Couldn't copy body");
 
-  // Caution -- here we manually create response, don't use CHECK()
-  // to prevent double response creation and thus memory leakage
+  // Caution -- here we manually create response, don't use CHECK() and/or
+  // goto's to prevent double response creation and thus memory leakage
   response = MHD_create_response_from_buffer_with_free_callback_cls(
       blength(resp_str),
       bdata(resp_str),
       (MHD_ContentReaderFreeCallback)bdestroy_silent,
       resp_str);
+
+  if (!response) {
+    goto error;
+  }
 
   MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, "text/html");
 
@@ -2609,12 +2795,15 @@ exit:
     LDBWCtx_destroy(ldbwctx);
   }
   lua_settop(lua, 0);
-  if (path != NULL) {
-    bdestroy(path);
+  if (_script_path != NULL) {
+    bdestroy(_script_path);
   }
 
   return ret;
 error:
+  if (resp_str != NULL) {
+    bdestroy(resp_str);
+  }
   MHD_RESPONSE_WITH_TAGBSTRING(
       connection,
       MHD_HTTP_INTERNAL_SERVER_ERROR,
@@ -2643,8 +2832,12 @@ static int mhd_handler(
 
     if (!strcmp(url, "/command")) {
       call_name = RESTAPI_COMMAND;
+    } else if (strstartswith(url, "/get_file/")) {
+      call_name = RESTAPI_GET_FILE;
     } else if (!strcmp(url, "/upload")) {
       call_name = RESTAPI_UPLOAD;
+    } else if (!strcmp(url, "/unsorted")) {
+      call_name = RESTAPI_UNSORTED;
     } else if (!strcmp(url, "/api/get_snippet")) {
       call_name = RESTAPI_GET_SNIPPET;
     } else if (!strcmp(url, "/api/create_snippet")) {
@@ -2657,6 +2850,8 @@ static int mhd_handler(
       call_name = RESTAPI_NGINX_UPLOAD;
     } else if (strstartswith(url, "/static/")) {
       call_name = RESTAPI_STATIC;
+    } else if (strstartswith(url, "/uploaded/")) {
+      call_name = RESTAPI_STATIC_UPLOADED;
     } else if (strstartswith(url, "/get_snippet/")) {
       call_name = HTTP_PATH_GET_SNIPPET;
     } else if (!strcmp(url, "/root") || strstartswith(url, "/root/")) {
@@ -2689,7 +2884,39 @@ static int mhd_handler(
   ci = *con_cls;
   ci->invocations++;
 
+  if (ci->method_name == HTTP_METHOD_POST) {
+    if (*upload_data_size != 0) {
+      if (blength(&ci->error) > 0) {
+        // skip data if we have error
+        *upload_data_size = 0;
+        ret = MHD_YES;
+        goto exit;
+      }
+      ret = do_post_process(connection, ci, upload_data, upload_data_size);
+      goto exit;
+    } else { // upload_data_size == 0
+      
+      if (blength(&ci->error) > 0) {
+        MHD_RESPONSE_WITH_TAGBSTRING(
+            connection, MHD_HTTP_BAD_REQUEST, response, ci->error, ret);
+      }
+      if (ci->invocations == 1) {
+        ret = do_post_process(connection, ci, upload_data, upload_data_size);
+        goto exit;
+      }
+      // fall through
+    }
+  }
+
   switch (ci->api_call_name) {
+  case RESTAPI_GET_FILE:
+    ret = mhd_handle_lua(
+        connection,
+        ci,
+        &BSS("luahttp/get_file.lua"),
+        upload_data,
+        upload_data_size);
+    goto exit;
   case RESTAPI_COMMAND:
     ret = mhd_api_handle_lua_with_post(
         connection, ci, upload_data, upload_data_size, "luahttp/command.lua");
@@ -2715,20 +2942,29 @@ static int mhd_handler(
     ret = mhd_api_handle_delete_snippet(connection, ci);
     goto exit;
   case RESTAPI_STATIC:
-    ret = mhd_api_handle_static(connection, ci);
+    ret = mhd_api_handle_static(
+        connection, &BSS("/static/"), &BSS("static/www"), ci);
+    goto exit;
+  case RESTAPI_STATIC_UPLOADED:
+    ret = mhd_api_handle_static(
+        connection, &BSS("/uploaded/"), app->uploads_path, ci);
     goto exit;
   case RESTAPI_UPLOAD:
   case RESTAPI_NGINX_UPLOAD:
     ret = mhd_api_handle_upload(connection, ci, upload_data, upload_data_size);
     goto exit;
+  case RESTAPI_UNSORTED:
+    ret =
+        mhd_api_handle_unsorted(connection, ci, upload_data, upload_data_size);
+    goto exit;
   case HTTP_PATH_LUA:
-    ret = mhd_handle_lua(connection, ci, upload_data, upload_data_size);
+    ret = mhd_handle_lua(connection, ci, NULL, upload_data, upload_data_size);
     goto exit;
   case HTTP_PATH_INDEX:
     switch (ci->at) {
     case HTTP_ACCEPT_TEXT_HTML:
       // ret = mhd_handle_index(connection, ci);
-      ret = mhd_handle_lua(connection, ci, upload_data, upload_data_size);
+      ret = mhd_handle_lua(connection, ci, NULL, upload_data, upload_data_size);
       goto exit;
     default:
     case HTTP_ACCEPT_APPLICATION_JSON:
