@@ -59,7 +59,6 @@ WHERE 1 = 1
   table.insert(q, "GROUP BY snippets.id ")
 
   local q = table.concat(q, " ")
-  print(q)
 
   local err = ldbw.prepare(ud, q)
   if err then print(err); return "server error" end
@@ -78,7 +77,6 @@ WHERE 1 = 1
   if parsed["tags"] ~= nil then
     for i = 1, #parsed["tags"] do
       local err = ldbw.bind_text(ud, to_bind, parsed["tags"][i])
-  print("tag to bind is ", string.format("-%s-", parsed["tags"][i]))
       to_bind = to_bind + 1
       if err then print(err); return "server error" end
     end
@@ -178,7 +176,6 @@ return function (ud)
   local form = {}
   local body = httpaux.get_body(ud)
   for line in body:gmatch("[^\n]+") do
-    print(line)
     local key, value = line:match("(%S-)=(.*)")
     form[key] = value
     -- table.insert(tb, i) -- in case you want to store each separate element in a table

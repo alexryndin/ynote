@@ -2628,13 +2628,9 @@ static void mhd_log(void *cls, const char *fm, va_list ap) {
   }
   bdestroy(b);
 }
-struct ConnInfo *ynote_get_conn_info(struct LuaCtx *lc) {
-  return lc->ci;
-}
+struct ConnInfo *ynote_get_conn_info(struct LuaCtx *lc) { return lc->ci; }
 int ynote_get_port(struct LuaCtx *lc) { return lc->ci->app->port; }
-struct LDBWCtx *ynote_get_ldbwctx(struct LuaCtx *lc) {
-  return lc->ldbwctx;
-}
+struct LDBWCtx *ynote_get_ldbwctx(struct LuaCtx *lc) { return lc->ldbwctx; }
 
 static int ynote_lua_check_and_execute_file(
     struct MHD_Connection *conn, struct ConnInfo *ci, const char *path) {
@@ -2838,6 +2834,8 @@ static int mhd_handler(
       call_name = RESTAPI_UPLOAD;
     } else if (!strcmp(url, "/unsorted")) {
       call_name = RESTAPI_UNSORTED;
+    } else if (!strcmp(url, "/unsorted/new")) {
+      call_name = RESTAPI_UNSORTED_NEW;
     } else if (!strcmp(url, "/api/get_snippet")) {
       call_name = RESTAPI_GET_SNIPPET;
     } else if (!strcmp(url, "/api/create_snippet")) {
@@ -2895,7 +2893,7 @@ static int mhd_handler(
       ret = do_post_process(connection, ci, upload_data, upload_data_size);
       goto exit;
     } else { // upload_data_size == 0
-      
+
       if (blength(&ci->error) > 0) {
         MHD_RESPONSE_WITH_TAGBSTRING(
             connection, MHD_HTTP_BAD_REQUEST, response, ci->error, ret);
@@ -2956,6 +2954,14 @@ static int mhd_handler(
   case RESTAPI_UNSORTED:
     ret =
         mhd_api_handle_unsorted(connection, ci, upload_data, upload_data_size);
+    goto exit;
+  case RESTAPI_UNSORTED_NEW:
+    ret = mhd_handle_lua(
+        connection,
+        ci,
+        &BSS("luahttp/unsorted_new.lua"),
+        upload_data,
+        upload_data_size);
     goto exit;
   case HTTP_PATH_LUA:
     ret = mhd_handle_lua(connection, ci, NULL, upload_data, upload_data_size);
