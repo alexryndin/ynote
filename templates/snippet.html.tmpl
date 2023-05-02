@@ -1,0 +1,20 @@
+{{define "snippet"}}
+{{template "header" .}}
+<body>
+  {{template "menu" .}}
+  <div class="main">
+    <h1>{{.snippet.Title}}</h1>
+    <div>
+      tags: {{.snippet.Tags}}
+      <br>
+      type: {{.snippet.Type}}
+      <br>
+      created: {{.snippet.Created}}
+      <br>
+      updated: {{.snippet.Updated}}
+      <hr>
+    </div>
+    {{.snippet.Content}}
+  </div>
+{{end}}
+

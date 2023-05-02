@@ -1,0 +1,20 @@
+{{define "upload"}}
+{{template "header" .}}
+<body>
+  {{template "menu" .}}
+  <div class="main">
+    <form id="search" accept-charset="UTF-8" action="/upload" method="post">
+    {{ if ne .msg "" }}
+      <div>
+        {{.msg}}
+      </div>
+    {{end}}
+      <input type="file" name="file" id="file" placeholder="file">
+      <input name="filename" id="search-input" placeholder="filename (optional)">
+      <input type="hidden" name="path" value="{{.path}}">
+    </form>
+  </div>
+</body>
+</html>
+{{end}}
+

@@ -1,0 +1,17 @@
+{{define "menu"}}
+<nav class="header-crumbs">
+  <strong>
+    <a rel="noopener noreferrer" href="//localhost:{{.port}}/">
+      <span class="muted">❯</span> Y
+    </a>
+    <span class="muted">·</span> 
+    <a rel="noopener noreferrer" href="//localhost:{{.port}}/snippet/new?path={{.menu.Path}}">new</a>
+    <span class="muted">·</span>
+    <a rel="noopener noreferrer" href="//localhost:{{.port}}{{.menu.Path}}">{{.menu.Path}}</a>
+    {{if .menu.Edit}}
+      <span class="muted">·</span>
+      <a rel="noopener noreferrer" href="//localhost:{{.port}}/snippet/{{.snippet.ID}}/edit?path={{.menu.Path}}">edit</a>
+    {{end}}
+  </strong>
+</nav>
+{{end}}

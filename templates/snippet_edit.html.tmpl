@@ -1,0 +1,24 @@
+{{define "snippet_edit"}}
+{{template "header" .}}
+<body>
+  {{template "menu" .}}
+  <div class="main">
+    <h1>{{.snippet.Title}}</h1>
+    {{ if .edit }}
+      <form action="/snippet/{{.snippet.ID}}/edit" accept-charset="UTF-8" method="post" enctype="text/plain">
+    {{else}}
+      <form action="/snippet/new?path={{.path}}" accept-charset="UTF-8" method="post" enctype="text/plain">
+    {{end}}
+      <textarea class="content" cols="70" id="content" name="content" rows="30">+++
+title = {{.snippet.Title}}
+type = {{.snippet.Type}}
+tags = {{.snippet.Tags}}
++++
+{{.snippet.Content}}</textarea>
+      <br>
+      <br>
+      <input type="submit" value="save">
+    </form>
+  </div>
+{{end}}
+
