@@ -180,6 +180,23 @@ RETURNING id`
 	return fmt.Sprintf("dir id:%d created", ret), nil
 }
 
+func mv(_type string, id int, destId int) (string, error) {
+	var q string
+	if _type == "s" {
+		q = `update snippets set dir = ? where id = ?`
+	} else if _type == "d" {
+		q = `update dirs set parent_id = ? where id = ?`
+	} else {
+		return "", errors.New("wrong type")
+	}
+	_, err := db.Exec(q, destId, id)
+	if err != nil {
+		logger.Debug(fmt.Sprintf("err %+v", err))
+		return "", err
+	}
+	return "ok", nil
+}
+
 func getAllSnippets(db *sql.DB) ([]Snippet, error) {
 	// Prepare the SELECT statement
 	stmt, err := db.Prepare("SELECT id, title, content FROM snippets where deleted = 0")
@@ -212,14 +229,20 @@ func ensureTags(db *sql.DB, tags []string) error {
 	if len(tags) == 0 {
 		return nil
 	}
-	q := fmt.Sprintf("INSERT OR IGNORE INTO tags (name) VALUES (%s)", strings.Repeat("(?),", len(tags))[0:])
+	questions := strings.Repeat("(?),", len(tags))
+	questions = questions[0 : len(questions)-1]
+	q := fmt.Sprintf("INSERT OR IGNORE INTO tags (name) VALUES (%s)", questions)
 	stmt, err := db.Prepare(q)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
-	_, err = stmt.Exec(tags)
+	var args []interface{}
+	for _, v := range tags {
+		args = append(args, v)
+	}
+	_, err = stmt.Exec(args...)
 	if err != nil {
 		return err
 	}
@@ -288,7 +311,11 @@ GROUP BY s.id`
 
 func editSnippet(db *sql.DB, s *Snippet) (int, error) {
 	// Prepare the INSERT statement
-	ensureTagsAsString(db, s.Tags)
+	tags_split := splitByComma(s.Tags)
+	err := ensureTags(db, tags_split)
+	if err != nil {
+		return 0, err
+	}
 	snippet_type, err := getOrInsertSnippetType(db, s.Type)
 	if err != nil {
 		return 0, err
@@ -312,8 +339,8 @@ func editSnippet(db *sql.DB, s *Snippet) (int, error) {
 
 	q = `INSERT OR IGNORE INTO snippet_to_tags
      (snippet_id, tag_id) SELECT ?, id FROM tags WHERE name IN (%s)`
-	q = fmt.Sprintf(q, strings.TrimSuffix(strings.Repeat("?,", len(s.Tags)), ","))
-	logger.Debug(fmt.Sprintf("q is %s", q))
+	q = fmt.Sprintf(q, strings.TrimSuffix(strings.Repeat("?,", len(tags_split)), ","))
+	logger.Debug(fmt.Sprintf("q is %s, tags is %+v", q, tags_split))
 	stmt, err := db.Prepare(q)
 	if err != nil {
 		return 0, err
@@ -323,7 +350,7 @@ func editSnippet(db *sql.DB, s *Snippet) (int, error) {
 
 	var args []interface{}
 	args = append(args, s.ID)
-	for _, v := range s.Tags {
+	for _, v := range tags_split {
 		args = append(args, v)
 
 	}
@@ -344,17 +371,22 @@ type File struct {
 	tags     string
 }
 
-func ensureTagsAsString(db *sql.DB, tags string) error {
-	tags_split := strings.Split(tags, ",")
-	var tags_new []string
-	for _, v := range tags_split {
+func splitByComma(s string) []string {
+	split := strings.Split(s, ",")
+	var ret []string
+	for _, v := range split {
 		v := strings.Trim(v, " ")
 		if v == "" {
 			continue
 		}
-		tags_new = append(tags_new, v)
+		ret = append(ret, v)
 	}
-	return ensureTags(db, tags_new)
+	return ret
+
+}
+
+func ensureTagsAsString(db *sql.DB, tags string) error {
+	return ensureTags(db, splitByComma(tags))
 }
 
 func regiesterFile(db *sql.DB, f *File) (int, error) {

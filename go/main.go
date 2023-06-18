@@ -25,6 +25,7 @@ import (
 var db *sql.DB
 var logger *zap.Logger
 var port = 8080
+var config *Config
 
 type RenderInfo struct {
 	Port int
@@ -153,6 +154,7 @@ func newSnippetHandler(c *gin.Context) {
 				Path: path,
 			},
 			"port": port,
+			"path": path,
 		})
 		return
 
@@ -198,7 +200,6 @@ func newSnippetHandler(c *gin.Context) {
 }
 
 func commandHandler(c *gin.Context) {
-	logger := c.MustGet("logger").(*zap.Logger)
 	contentb, err := ioutil.ReadAll(c.Request.Body)
 	if err != nil {
 		c.HTML(http.StatusInternalServerError, "error", gin.H{
@@ -259,6 +260,39 @@ func commandHandler(c *gin.Context) {
 		}
 
 		msg, err := mkdir(db, name, id)
+		if err != nil {
+			logger.Error(err.Error())
+			indexMsgHandler(c, http.StatusInternalServerError, "Internal error")
+			return
+		}
+		indexMsgHandler(c, http.StatusOK, msg)
+		return
+
+	} else if cs[0] == "mv" {
+		usage := "Usage: mv s|d <name> <destination>"
+		if len(cs) < 3 {
+			indexMsgHandler(c, http.StatusBadRequest, usage)
+			return
+		}
+		_type := cs[1]
+		idStr := cs[2]
+		destStr := cs[3]
+		if _type != "d" && _type != "s" {
+			indexMsgHandler(c, http.StatusBadRequest, usage)
+			return
+		}
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			indexMsgHandler(c, http.StatusBadRequest, "wrong id")
+			return
+		}
+		destId, err := strconv.Atoi(destStr)
+		if err != nil {
+			indexMsgHandler(c, http.StatusBadRequest, "wrong destination")
+			return
+		}
+
+		msg, err := mv(_type, id, destId)
 		if err != nil {
 			logger.Error(err.Error())
 			indexMsgHandler(c, http.StatusInternalServerError, "Internal error")
@@ -463,6 +497,7 @@ func editSnippetHandler(c *gin.Context) {
 		rs, err := extractValidateRawSnippet(content)
 		snippet.Title = rs.fm["title"]
 		snippet.Tags = rs.fm["tags"]
+		logger.Debug(fmt.Sprintf("tags is %+v", snippet.Tags))
 		snippet.Type = rs.fm["type"]
 		snippet.Content = (template.HTML)(rs.Content)
 		logger.Debug(fmt.Sprintf("q is %+v", snippet))
@@ -540,10 +575,15 @@ type Menu struct {
 
 type Config struct {
 	Server struct {
+		Host string
 		Port int
 	}
 	Database struct {
 		Path string
+	}
+	Bot struct {
+		Enable  bool
+		AdminID int64 `toml:"admin_id"`
 	}
 }
 
@@ -577,12 +617,12 @@ func init() {
 }
 
 func main() {
-	logger, _ = zap.NewDevelopment()
+	logger = zap.Must(zap.NewDevelopment())
 	defer logger.Sync()
 	pflag.Parse()
 	var err error
 	// Read the config from a file
-	config, err := readConfig(configFile)
+	config, err = readConfig(configFile)
 	if err != nil {
 		panic(err)
 	}
@@ -595,7 +635,8 @@ func main() {
 		},
 	)
 
-	db, err = sql.Open("sqlite3_ext", "file:"+config.Database.Path+"?mode=rw")
+	db_path := os.ExpandEnv(config.Database.Path)
+	db, err = sql.Open("sqlite3_ext", "file:"+db_path+"?mode=rw")
 	if err != nil || db == nil {
 		panic(err)
 	}
@@ -627,5 +668,10 @@ func main() {
 	r.Static("/static", "static/www/")
 
 	// Start the server
-	r.Run()
+	logger.Info(fmt.Sprintf("enable bot = %t", config.Bot.Enable))
+	if config.Bot.Enable {
+		go bot_run()
+	}
+	port = config.Server.Port
+	r.Run(fmt.Sprintf("%s:%d", config.Server.Host, port))
 }
